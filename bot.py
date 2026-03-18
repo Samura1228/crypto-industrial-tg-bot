@@ -60,6 +60,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Sit back and relax! 🚀"
     )
 
+    # Send immediate update
+    await update.message.reply_text("Fetching current prices for you... ⏳")
+    message = price_service.get_prices()
+    await update.message.reply_text(message, parse_mode='Markdown')
+
 async def send_daily_notification(context: ContextTypes.DEFAULT_TYPE):
     """
     The job function that sends the price update.
