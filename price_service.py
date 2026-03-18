@@ -46,10 +46,22 @@ def get_metal_prices():
     """Fetches Gold and Silver prices from Yahoo Finance."""
     try:
         # GC=F is Gold Futures, SI=F is Silver Futures
-        tickers = yf.Tickers("GC=F SI=F")
+        gold = yf.Ticker("GC=F")
+        silver = yf.Ticker("SI=F")
         
-        gold_price = tickers.tickers["GC=F"].info.get("regularMarketPrice") or tickers.tickers["GC=F"].info.get("previousClose")
-        silver_price = tickers.tickers["SI=F"].info.get("regularMarketPrice") or tickers.tickers["SI=F"].info.get("previousClose")
+        # Use history() to get the latest price, which is more reliable than .info
+        gold_hist = gold.history(period="1d")
+        silver_hist = silver.history(period="1d")
+        
+        if not gold_hist.empty:
+            gold_price = gold_hist['Close'].iloc[-1]
+        else:
+            gold_price = None
+            
+        if not silver_hist.empty:
+            silver_price = silver_hist['Close'].iloc[-1]
+        else:
+            silver_price = None
         
         return {
             "Gold": gold_price,
