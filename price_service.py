@@ -112,13 +112,11 @@ def get_prices():
             logger.error(f"Error fetching crypto data: {data}")
 
         # Helper to get formatted string "Price ⬆️"
-        def p(symbol_data, show_arrow=False):
+        def p(symbol_data):
             if not symbol_data: return "N/A"
             price = format_price(symbol_data.get("price"))
-            if show_arrow:
-                arrow = get_arrow(symbol_data.get("change"))
-                return f"{price}{arrow}"
-            return price
+            arrow = get_arrow(symbol_data.get("change"))
+            return f"{price}{arrow}"
 
         # Construct the message
         message = (
@@ -129,8 +127,8 @@ def get_prices():
             f"💎 **Toncoin (TON):** {p(crypto_data.get('TON'))}\n"
             f"☀️ **Solana (SOL):** {p(crypto_data.get('SOL'))}\n\n"
             "**Metals (1 oz):**\n"
-            f"🟡 **Gold (PAXG):** {p(crypto_data.get('PAXG'), show_arrow=True)}\n"
-            f"⚪ **Silver (KAG):** {p(crypto_data.get('KAG'), show_arrow=True)}\n\n"
+            f"🟡 **Gold (PAXG):** {p(crypto_data.get('PAXG'))}\n"
+            f"⚪ **Silver (KAG):** {p(crypto_data.get('KAG'))}\n\n"
             "**Oil (Barrel):**\n"
             f"🛢️ **WTI Crude:** {p(oil_data.get('WTI'))}\n"
             f"🛢️ **Brent Crude:** {p(oil_data.get('Brent'))}\n"
