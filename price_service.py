@@ -26,12 +26,27 @@ def format_price(price):
     except (ValueError, TypeError):
         return "N/A"
 
+def get_arrow(change):
+    """Returns an arrow emoji based on price change."""
+    if change is None:
+        return ""
+    try:
+        change = float(change)
+        if change > 0:
+            return "⬆️"
+        elif change < 0:
+            return "⬇️"
+        else:
+            return ""
+    except (ValueError, TypeError):
+        return ""
+
 def get_oil_prices():
     """
     Fetches WTI and Brent Crude Oil prices from Stooq.
-    Returns a dictionary with 'WTI' and 'Brent' prices.
+    Returns a dictionary with 'WTI' and 'Brent' data (price, change).
     """
-    prices = {"WTI": None, "Brent": None}
+    data = {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}}
     # CL.F = WTI Crude Oil, CB.F = Brent Crude Oil
     symbols = {"WTI": "CL.F", "Brent": "CB.F"}
     
@@ -47,10 +62,16 @@ def get_oil_prices():
                 row = next(reader)    # Get data row
                 
                 # Stooq CSV format: Symbol, Date, Time, Open, High, Low, Close
-                # We want Close price. Usually index 6, but let's be safe if header changes?
-                # Actually Stooq format is quite stable.
                 if len(row) >= 7:
-                    prices[name] = row[6] # Close price
+                    try:
+                        close_price = float(row[6])
+                        open_price = float(row[3])
+                        change = close_price - open_price
+                        
+                        data[name]["price"] = close_price
+                        data[name]["change"] = change
+                    except (ValueError, IndexError):
+                        data[name]["price"] = row[6] # Keep as string if float fails
                 else:
                     logger.warning(f"Stooq returned unexpected row format for {sym}: {row}")
             else:
@@ -59,12 +80,12 @@ def get_oil_prices():
         except Exception as e:
             logger.error(f"Error fetching oil price for {name}: {e}")
             
-    return prices
+    return data
 
 def get_prices():
     """
     Fetches current prices for BTC, ETH, TON, SOL, Gold (PAXG), Silver (KAG), and Oil.
-    Returns a formatted string message.
+    Returns a formatted string message with trend arrows.
     """
     # PAXG = Pax Gold (1 oz Gold backed token)
     # KAG = Kinesis Silver (1 oz Silver backed token)
@@ -72,8 +93,8 @@ def get_prices():
     tsyms = "USD"
     url = f"{BASE_URL}?fsyms={fsyms}&tsyms={tsyms}&api_key={API_KEY}"
     
-    crypto_prices = {}
-    oil_prices = get_oil_prices()
+    crypto_data = {}
+    oil_data = get_oil_prices()
     
     try:
         response = requests.get(url)
@@ -82,26 +103,35 @@ def get_prices():
         if "RAW" in data:
             for symbol in ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG"]:
                 try:
-                    crypto_prices[symbol] = data["RAW"][symbol]["USD"]["PRICE"]
+                    price = data["RAW"][symbol]["USD"]["PRICE"]
+                    change = data["RAW"][symbol]["USD"]["CHANGE24HOUR"]
+                    crypto_data[symbol] = {"price": price, "change": change}
                 except KeyError:
-                    crypto_prices[symbol] = None
+                    crypto_data[symbol] = {"price": None, "change": None}
         else:
             logger.error(f"Error fetching crypto data: {data}")
+
+        # Helper to get formatted string "Price ⬆️"
+        def p(symbol_data):
+            if not symbol_data: return "N/A"
+            price = format_price(symbol_data.get("price"))
+            arrow = get_arrow(symbol_data.get("change"))
+            return f"{price}{arrow}"
 
         # Construct the message
         message = (
             "📊 **Daily Market Update** 📊\n\n"
             "**Crypto:**\n"
-            f"₿ **Bitcoin (BTC):** {format_price(crypto_prices.get('BTC'))}\n"
-            f"💎 **Ethereum (ETH):** {format_price(crypto_prices.get('ETH'))}\n"
-            f"💎 **Toncoin (TON):** {format_price(crypto_prices.get('TON'))}\n"
-            f"☀️ **Solana (SOL):** {format_price(crypto_prices.get('SOL'))}\n\n"
+            f"₿ **Bitcoin (BTC):** {p(crypto_data.get('BTC'))}\n"
+            f"💎 **Ethereum (ETH):** {p(crypto_data.get('ETH'))}\n"
+            f"💎 **Toncoin (TON):** {p(crypto_data.get('TON'))}\n"
+            f"☀️ **Solana (SOL):** {p(crypto_data.get('SOL'))}\n\n"
             "**Metals (1 oz):**\n"
-            f"🟡 **Gold (PAXG):** {format_price(crypto_prices.get('PAXG'))}\n"
-            f"⚪ **Silver (KAG):** {format_price(crypto_prices.get('KAG'))}\n\n"
+            f"🟡 **Gold (PAXG):** {p(crypto_data.get('PAXG'))}\n"
+            f"⚪ **Silver (KAG):** {p(crypto_data.get('KAG'))}\n\n"
             "**Oil (Barrel):**\n"
-            f"🛢️ **WTI Crude:** {format_price(oil_prices.get('WTI'))}\n"
-            f"🛢️ **Brent Crude:** {format_price(oil_prices.get('Brent'))}\n"
+            f"🛢️ **WTI Crude:** {p(oil_data.get('WTI'))}\n"
+            f"🛢️ **Brent Crude:** {p(oil_data.get('Brent'))}\n"
         )
         
         return message
