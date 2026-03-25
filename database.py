@@ -11,7 +11,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Determine database path
-# Check for DATA_DIR environment variable (e.g., for Railway Volume)
 DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_NAME = "bot_data.db"
 DB_PATH = os.path.join(DATA_DIR, DB_NAME)
@@ -20,28 +19,46 @@ DB_PATH = os.path.join(DATA_DIR, DB_NAME)
 if not os.path.exists(DATA_DIR):
     try:
         os.makedirs(DATA_DIR)
-        logger.info(f"Created data directory: {DATA_DIR}")
-    except OSError as e:
-        logger.error(f"Error creating data directory {DATA_DIR}: {e}")
-        # Fallback to current directory if creation fails
+    except OSError:
         DB_PATH = DB_NAME
 
 logger.info(f"Using database at: {DB_PATH}")
 
 def init_db():
-    """Initialize the database and create the subscriptions table if it doesn't exist."""
+    """Initialize the database and create the subscriptions table."""
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        # Create new table with ID primary key to allow multiple subs per user
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS subscriptions_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
                 chat_id INTEGER NOT NULL,
                 notification_time TEXT NOT NULL,
+                timezone TEXT DEFAULT 'UTC',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Check if old table exists and migrate
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='subscriptions'")
+        if cursor.fetchone():
+            logger.info("Migrating old subscriptions...")
+            cursor.execute('SELECT user_id, chat_id, notification_time FROM subscriptions')
+            rows = cursor.fetchall()
+            for row in rows:
+                # Check if already migrated
+                cursor.execute('SELECT id FROM subscriptions_v2 WHERE user_id=? AND notification_time=?', (row[0], row[2]))
+                if not cursor.fetchone():
+                    cursor.execute('INSERT INTO subscriptions_v2 (user_id, chat_id, notification_time) VALUES (?, ?, ?)', row)
+            
+            # Rename old table to backup (optional, or just leave it)
+            cursor.execute('ALTER TABLE subscriptions RENAME TO subscriptions_backup')
+            logger.info("Migration complete.")
+            
         conn.commit()
         logger.info("Database initialized successfully.")
     except sqlite3.Error as e:
@@ -50,61 +67,99 @@ def init_db():
         if conn:
             conn.close()
 
-def add_subscription(user_id: int, chat_id: int, notification_time: time):
-    """Add or update a user's subscription."""
+def add_subscription(user_id: int, chat_id: int, notification_time: time, timezone: str = 'UTC'):
+    """Add a new subscription for a user."""
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Store time as string "HH:MM:SS"
         time_str = notification_time.strftime("%H:%M:%S")
         
+        # Check if exact subscription already exists
         cursor.execute('''
-            INSERT OR REPLACE INTO subscriptions (user_id, chat_id, notification_time)
-            VALUES (?, ?, ?)
-        ''', (user_id, chat_id, time_str))
+            SELECT id FROM subscriptions_v2 
+            WHERE user_id = ? AND notification_time = ?
+        ''', (user_id, time_str))
+        
+        if cursor.fetchone():
+            logger.info(f"Subscription already exists for user {user_id} at {time_str}")
+            return
+
+        cursor.execute('''
+            INSERT INTO subscriptions_v2 (user_id, chat_id, notification_time, timezone)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, chat_id, time_str, timezone))
         
         conn.commit()
-        logger.info(f"Subscription added/updated for user {user_id} at {time_str}")
+        logger.info(f"Subscription added for user {user_id} at {time_str} ({timezone})")
     except sqlite3.Error as e:
         logger.error(f"Error adding subscription: {e}")
     finally:
         if conn:
             conn.close()
 
-def remove_subscription(user_id: int):
-    """Remove a user's subscription."""
+def remove_subscription(user_id: int, notification_time: time = None):
+    """Remove a user's subscription(s). If time is None, remove all."""
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM subscriptions WHERE user_id = ?', (user_id,))
+        
+        if notification_time:
+            time_str = notification_time.strftime("%H:%M:%S")
+            cursor.execute('DELETE FROM subscriptions_v2 WHERE user_id = ? AND notification_time = ?', (user_id, time_str))
+        else:
+            cursor.execute('DELETE FROM subscriptions_v2 WHERE user_id = ?', (user_id,))
+            
         conn.commit()
-        logger.info(f"Subscription removed for user {user_id}")
+        logger.info(f"Subscription(s) removed for user {user_id}")
     except sqlite3.Error as e:
         logger.error(f"Error removing subscription: {e}")
     finally:
         if conn:
             conn.close()
 
-def get_all_subscriptions():
-    """Retrieve all active subscriptions."""
+def get_user_subscriptions(user_id: int):
+    """Retrieve all subscriptions for a specific user."""
     subscriptions = []
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('SELECT user_id, chat_id, notification_time FROM subscriptions')
+        cursor.execute('SELECT notification_time, timezone FROM subscriptions_v2 WHERE user_id = ?', (user_id,))
         rows = cursor.fetchall()
         
         for row in rows:
-            # Convert time string back to time object
+            h, m, s = map(int, row[0].split(':'))
+            subscriptions.append({
+                'notification_time': time(hour=h, minute=m, second=s),
+                'timezone': row[1]
+            })
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching user subscriptions: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return subscriptions
+
+def get_all_subscriptions():
+    """Retrieve all active subscriptions for the scheduler."""
+    subscriptions = []
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, chat_id, notification_time, timezone FROM subscriptions_v2')
+        rows = cursor.fetchall()
+        
+        for row in rows:
             h, m, s = map(int, row[2].split(':'))
             subscriptions.append({
                 'user_id': row[0],
                 'chat_id': row[1],
-                'notification_time': time(hour=h, minute=m, second=s)
+                'notification_time': time(hour=h, minute=m, second=s),
+                'timezone': row[3]
             })
             
     except sqlite3.Error as e:
