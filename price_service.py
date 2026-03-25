@@ -3,6 +3,7 @@ import requests
 import logging
 import csv
 import io
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -16,7 +17,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
+AV_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 BASE_URL = "https://min-api.cryptocompare.com/data/pricemultifull"
+
+# Cache to avoid rate limits (Alpha Vantage: 5 req/min, 500/day)
+# Cache for 30 minutes
+CACHE_DURATION = 1800 
+_price_cache = {
+    "oil": {"data": None, "timestamp": 0},
+    "forex": {"data": None, "timestamp": 0}
+}
 
 def format_price(price, symbol="$"):
     if price is None:
@@ -43,80 +53,148 @@ def get_arrow(change):
 
 def get_forex_prices():
     """
-    Fetches USD/RUB and EUR/RUB prices from Stooq.
-    Returns a dictionary with 'USD' and 'EUR' data (price, change).
+    Fetches USD/RUB and EUR/RUB prices.
+    Tries Alpha Vantage first (if key exists), then Stooq.
     """
+    # Check cache
+    if time.time() - _price_cache["forex"]["timestamp"] < CACHE_DURATION and _price_cache["forex"]["data"]:
+        return _price_cache["forex"]["data"]
+
     data = {"USD": {"price": None, "change": None}, "EUR": {"price": None, "change": None}}
-    symbols = {"USD": "USDRUB", "EUR": "EURRUB"}
     
+    # Try Alpha Vantage if key is present
+    if AV_API_KEY:
+        try:
+            # USD/RUB
+            url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=RUB&apikey={AV_API_KEY}"
+            r = requests.get(url)
+            d = r.json()
+            if "Realtime Currency Exchange Rate" in d:
+                rate = d["Realtime Currency Exchange Rate"]
+                price = float(rate["5. Exchange Rate"])
+                # AV doesn't give 24h change directly in this endpoint, only price.
+                # We can't calculate change easily without history.
+                # So we'll just show price for now, or 0 change.
+                data["USD"]["price"] = price
+                data["USD"]["change"] = 0 
+            
+            # EUR/RUB
+            url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=EUR&to_currency=RUB&apikey={AV_API_KEY}"
+            r = requests.get(url)
+            d = r.json()
+            if "Realtime Currency Exchange Rate" in d:
+                rate = d["Realtime Currency Exchange Rate"]
+                price = float(rate["5. Exchange Rate"])
+                data["EUR"]["price"] = price
+                data["EUR"]["change"] = 0
+
+            # Update cache if we got data
+            if data["USD"]["price"] and data["EUR"]["price"]:
+                _price_cache["forex"] = {"data": data, "timestamp": time.time()}
+                return data
+                
+        except Exception as e:
+            logger.error(f"Alpha Vantage Forex error: {e}")
+
+    # Fallback to Stooq (might fail on Railway)
+    symbols = {"USD": "USDRUB", "EUR": "EURRUB"}
     for name, sym in symbols.items():
+        if data[name]["price"] is not None: continue # Skip if already found
         try:
             url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlc&h&e=csv"
-            response = requests.get(url, timeout=10)
-            
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 f = io.StringIO(response.text)
                 reader = csv.reader(f)
-                header = next(reader) # Skip header
-                row = next(reader)    # Get data row
-                
+                next(reader) # Skip header
+                row = next(reader)
                 if len(row) >= 7:
                     try:
                         close_price = float(row[6])
                         open_price = float(row[3])
-                        change = close_price - open_price
-                        
                         data[name]["price"] = close_price
-                        data[name]["change"] = change
-                    except (ValueError, IndexError):
-                        data[name]["price"] = row[6]
-                else:
-                    logger.warning(f"Stooq returned unexpected row format for {sym}: {row}")
-            else:
-                logger.warning(f"Stooq returned status {response.status_code} for {sym}")
-                
+                        data[name]["change"] = close_price - open_price
+                    except: pass
         except Exception as e:
-            logger.error(f"Error fetching forex price for {name}: {e}")
+            logger.error(f"Stooq Forex error for {name}: {e}")
             
     return data
 
 def get_oil_prices():
     """
-    Fetches WTI and Brent Crude Oil prices from Stooq.
-    Returns a dictionary with 'WTI' and 'Brent' data (price, change).
+    Fetches WTI and Brent Crude Oil prices.
+    Tries Alpha Vantage first (if key exists), then Stooq.
     """
+    # Check cache
+    if time.time() - _price_cache["oil"]["timestamp"] < CACHE_DURATION and _price_cache["oil"]["data"]:
+        return _price_cache["oil"]["data"]
+
     data = {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}}
-    # CL.F = WTI Crude Oil, CB.F = Brent Crude Oil
-    symbols = {"WTI": "CL.F", "Brent": "CB.F"}
     
+    # Try Alpha Vantage if key is present
+    if AV_API_KEY:
+        try:
+            # WTI
+            url = f"https://www.alphavantage.co/query?function=WTI&interval=daily&apikey={AV_API_KEY}"
+            r = requests.get(url)
+            d = r.json()
+            if "data" in d and len(d["data"]) > 0:
+                # Get latest price
+                latest = d["data"][0]
+                price = float(latest["value"])
+                # Previous price for change
+                if len(d["data"]) > 1:
+                    prev = float(d["data"][1]["value"])
+                    change = price - prev
+                else:
+                    change = 0
+                data["WTI"]["price"] = price
+                data["WTI"]["change"] = change
+            
+            # Brent
+            url = f"https://www.alphavantage.co/query?function=BRENT&interval=daily&apikey={AV_API_KEY}"
+            r = requests.get(url)
+            d = r.json()
+            if "data" in d and len(d["data"]) > 0:
+                latest = d["data"][0]
+                price = float(latest["value"])
+                if len(d["data"]) > 1:
+                    prev = float(d["data"][1]["value"])
+                    change = price - prev
+                else:
+                    change = 0
+                data["Brent"]["price"] = price
+                data["Brent"]["change"] = change
+
+            # Update cache if we got data
+            if data["WTI"]["price"] and data["Brent"]["price"]:
+                _price_cache["oil"] = {"data": data, "timestamp": time.time()}
+                return data
+
+        except Exception as e:
+            logger.error(f"Alpha Vantage Oil error: {e}")
+
+    # Fallback to Stooq
+    symbols = {"WTI": "CL.F", "Brent": "CB.F"}
     for name, sym in symbols.items():
+        if data[name]["price"] is not None: continue
         try:
             url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlc&h&e=csv"
-            response = requests.get(url, timeout=10)
-            
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 f = io.StringIO(response.text)
                 reader = csv.reader(f)
-                header = next(reader) # Skip header
-                row = next(reader)    # Get data row
-                
+                next(reader)
+                row = next(reader)
                 if len(row) >= 7:
                     try:
                         close_price = float(row[6])
                         open_price = float(row[3])
-                        change = close_price - open_price
-                        
                         data[name]["price"] = close_price
-                        data[name]["change"] = change
-                    except (ValueError, IndexError):
-                        data[name]["price"] = row[6]
-                else:
-                    logger.warning(f"Stooq returned unexpected row format for {sym}: {row}")
-            else:
-                logger.warning(f"Stooq returned status {response.status_code} for {sym}")
-                
+                        data[name]["change"] = close_price - open_price
+                    except: pass
         except Exception as e:
-            logger.error(f"Error fetching oil price for {name}: {e}")
+            logger.error(f"Stooq Oil error for {name}: {e}")
             
     return data
 
