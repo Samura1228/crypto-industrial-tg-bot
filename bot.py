@@ -102,6 +102,12 @@ async def restore_jobs(context: ContextTypes.DEFAULT_TYPE):
         
     logger.info(f"Restored {count} subscriptions from database.")
 
+async def update_price_cache_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Background job to update price cache periodically.
+    """
+    price_service.update_cache()
+
 if __name__ == '__main__':
     # Initialize Database
     database.init_db()
@@ -120,6 +126,10 @@ if __name__ == '__main__':
     # Restore jobs on startup
     # We schedule a job to run immediately (when=0) to restore subscriptions
     application.job_queue.run_once(restore_jobs, when=0)
+    
+    # Schedule background cache update every 15 minutes (900s)
+    # Run immediately on startup (first=1)
+    application.job_queue.run_repeating(update_price_cache_job, interval=900, first=1)
 
     logger.info("Bot is starting...")
     
