@@ -72,12 +72,14 @@ def get_forex_prices():
             if "Realtime Currency Exchange Rate" in d:
                 rate = d["Realtime Currency Exchange Rate"]
                 price = float(rate["5. Exchange Rate"])
-                # AV doesn't give 24h change directly in this endpoint, only price.
-                # We can't calculate change easily without history.
-                # So we'll just show price for now, or 0 change.
                 data["USD"]["price"] = price
-                data["USD"]["change"] = 0 
+                data["USD"]["change"] = 0
+            elif "Note" in d:
+                logger.warning(f"Alpha Vantage Rate Limit (USD/RUB): {d['Note']}")
             
+            # Wait to respect rate limit (5 req/min = 1 req/12s)
+            time.sleep(12)
+
             # EUR/RUB
             url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=EUR&to_currency=RUB&apikey={AV_API_KEY}"
             r = requests.get(url)
@@ -87,6 +89,8 @@ def get_forex_prices():
                 price = float(rate["5. Exchange Rate"])
                 data["EUR"]["price"] = price
                 data["EUR"]["change"] = 0
+            elif "Note" in d:
+                logger.warning(f"Alpha Vantage Rate Limit (EUR/RUB): {d['Note']}")
 
             # Update cache if we got data
             if data["USD"]["price"] and data["EUR"]["price"]:
@@ -139,10 +143,8 @@ def get_oil_prices():
             r = requests.get(url)
             d = r.json()
             if "data" in d and len(d["data"]) > 0:
-                # Get latest price
                 latest = d["data"][0]
                 price = float(latest["value"])
-                # Previous price for change
                 if len(d["data"]) > 1:
                     prev = float(d["data"][1]["value"])
                     change = price - prev
@@ -150,7 +152,12 @@ def get_oil_prices():
                     change = 0
                 data["WTI"]["price"] = price
                 data["WTI"]["change"] = change
+            elif "Note" in d:
+                logger.warning(f"Alpha Vantage Rate Limit (WTI): {d['Note']}")
             
+            # Wait to respect rate limit
+            time.sleep(12)
+
             # Brent
             url = f"https://www.alphavantage.co/query?function=BRENT&interval=daily&apikey={AV_API_KEY}"
             r = requests.get(url)
@@ -165,6 +172,8 @@ def get_oil_prices():
                     change = 0
                 data["Brent"]["price"] = price
                 data["Brent"]["change"] = change
+            elif "Note" in d:
+                logger.warning(f"Alpha Vantage Rate Limit (Brent): {d['Note']}")
 
             # Update cache if we got data
             if data["WTI"]["price"] and data["Brent"]["price"]:
