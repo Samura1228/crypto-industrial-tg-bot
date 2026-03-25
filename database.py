@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import os
 from datetime import time
 
 # Configure logging
@@ -9,12 +10,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Determine database path
+# Check for DATA_DIR environment variable (e.g., for Railway Volume)
+DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_NAME = "bot_data.db"
+DB_PATH = os.path.join(DATA_DIR, DB_NAME)
+
+# Ensure the directory exists
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR)
+        logger.info(f"Created data directory: {DATA_DIR}")
+    except OSError as e:
+        logger.error(f"Error creating data directory {DATA_DIR}: {e}")
+        # Fallback to current directory if creation fails
+        DB_PATH = DB_NAME
+
+logger.info(f"Using database at: {DB_PATH}")
 
 def init_db():
     """Initialize the database and create the subscriptions table if it doesn't exist."""
+    conn = None
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -34,8 +52,9 @@ def init_db():
 
 def add_subscription(user_id: int, chat_id: int, notification_time: time):
     """Add or update a user's subscription."""
+    conn = None
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         # Store time as string "HH:MM:SS"
@@ -56,8 +75,9 @@ def add_subscription(user_id: int, chat_id: int, notification_time: time):
 
 def remove_subscription(user_id: int):
     """Remove a user's subscription."""
+    conn = None
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM subscriptions WHERE user_id = ?', (user_id,))
         conn.commit()
@@ -71,8 +91,9 @@ def remove_subscription(user_id: int):
 def get_all_subscriptions():
     """Retrieve all active subscriptions."""
     subscriptions = []
+    conn = None
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT user_id, chat_id, notification_time FROM subscriptions')
         rows = cursor.fetchall()
