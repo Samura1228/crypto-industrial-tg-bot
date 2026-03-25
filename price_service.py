@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
 BASE_URL = "https://min-api.cryptocompare.com/data/pricemultifull"
 
-def format_price(price):
+def format_price(price, symbol="$"):
     if price is None:
         return "N/A"
     try:
-        return f"${float(price):,.2f}"
+        return f"{symbol}{float(price):,.2f}"
     except (ValueError, TypeError):
         return "N/A"
 
@@ -40,6 +40,45 @@ def get_arrow(change):
             return ""
     except (ValueError, TypeError):
         return ""
+
+def get_forex_prices():
+    """
+    Fetches USD/RUB and EUR/RUB prices from Stooq.
+    Returns a dictionary with 'USD' and 'EUR' data (price, change).
+    """
+    data = {"USD": {"price": None, "change": None}, "EUR": {"price": None, "change": None}}
+    symbols = {"USD": "USDRUB", "EUR": "EURRUB"}
+    
+    for name, sym in symbols.items():
+        try:
+            url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlc&h&e=csv"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                f = io.StringIO(response.text)
+                reader = csv.reader(f)
+                header = next(reader) # Skip header
+                row = next(reader)    # Get data row
+                
+                if len(row) >= 7:
+                    try:
+                        close_price = float(row[6])
+                        open_price = float(row[3])
+                        change = close_price - open_price
+                        
+                        data[name]["price"] = close_price
+                        data[name]["change"] = change
+                    except (ValueError, IndexError):
+                        data[name]["price"] = row[6]
+                else:
+                    logger.warning(f"Stooq returned unexpected row format for {sym}: {row}")
+            else:
+                logger.warning(f"Stooq returned status {response.status_code} for {sym}")
+                
+        except Exception as e:
+            logger.error(f"Error fetching forex price for {name}: {e}")
+            
+    return data
 
 def get_oil_prices():
     """
@@ -61,7 +100,6 @@ def get_oil_prices():
                 header = next(reader) # Skip header
                 row = next(reader)    # Get data row
                 
-                # Stooq CSV format: Symbol, Date, Time, Open, High, Low, Close
                 if len(row) >= 7:
                     try:
                         close_price = float(row[6])
@@ -71,7 +109,7 @@ def get_oil_prices():
                         data[name]["price"] = close_price
                         data[name]["change"] = change
                     except (ValueError, IndexError):
-                        data[name]["price"] = row[6] # Keep as string if float fails
+                        data[name]["price"] = row[6]
                 else:
                     logger.warning(f"Stooq returned unexpected row format for {sym}: {row}")
             else:
@@ -84,7 +122,7 @@ def get_oil_prices():
 
 def get_prices():
     """
-    Fetches current prices for BTC, ETH, TON, SOL, Gold (PAXG), Silver (KAG), and Oil.
+    Fetches current prices for BTC, ETH, TON, SOL, Gold (PAXG), Silver (KAG), Oil, and Forex.
     Returns a formatted string message with trend arrows.
     """
     # PAXG = Pax Gold (1 oz Gold backed token)
@@ -95,6 +133,7 @@ def get_prices():
     
     crypto_data = {}
     oil_data = get_oil_prices()
+    forex_data = get_forex_prices()
     
     try:
         response = requests.get(url)
@@ -112,9 +151,9 @@ def get_prices():
             logger.error(f"Error fetching crypto data: {data}")
 
         # Helper to get formatted string "Price ⬆️"
-        def p(symbol_data):
+        def p(symbol_data, currency_symbol="$"):
             if not symbol_data: return "N/A"
-            price = format_price(symbol_data.get("price"))
+            price = format_price(symbol_data.get("price"), currency_symbol)
             arrow = get_arrow(symbol_data.get("change"))
             return f"{price}{arrow}"
 
@@ -131,7 +170,10 @@ def get_prices():
             f"⚪ **Silver (KAG):** {p(crypto_data.get('KAG'))}\n\n"
             "**Oil (Barrel):**\n"
             f"🛢️ **WTI Crude:** {p(oil_data.get('WTI'))}\n"
-            f"🛢️ **Brent Crude:** {p(oil_data.get('Brent'))}\n"
+            f"🛢️ **Brent Crude:** {p(oil_data.get('Brent'))}\n\n"
+            "**Currencies (RUB):**\n"
+            f"🇺🇸 **USD/RUB:** {p(forex_data.get('USD'), '₽')}\n"
+            f"🇪🇺 **EUR/RUB:** {p(forex_data.get('EUR'), '₽')}\n"
         )
         
         return message
