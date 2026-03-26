@@ -20,7 +20,9 @@ API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
 AV_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 BASE_URL = "https://min-api.cryptocompare.com/data/pricemultifull"
 
-# Global cache
+# Cache to avoid rate limits
+# Cache for 30 minutes
+CACHE_DURATION = 1800 
 _cache = {
     "crypto": {},
     "oil": {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}},
@@ -75,35 +77,51 @@ def get_av_data(function, symbol=None, from_curr=None, to_curr=None):
 def update_cache():
     """
     Fetches all data and updates the global cache.
-    This function takes time (30s+) due to rate limits.
     """
     logger.info("Updating price cache...")
     
-    # 1. Fetch Crypto + Metals + EUR/USD (CryptoCompare)
-    fsyms = "BTC,ETH,TON,SOL,PAXG,KAG,EUR"
+    # 1. Fetch Crypto + Metals (CryptoCompare)
+    fsyms = "BTC,ETH,TON,SOL,PAXG,KAG"
     tsyms = "USD"
     url = f"{BASE_URL}?fsyms={fsyms}&tsyms={tsyms}&api_key={API_KEY}"
-    
-    eur_usd_rate = None
     
     try:
         response = requests.get(url)
         data = response.json()
         
         if "RAW" in data:
-            for symbol in ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG", "EUR"]:
+            for symbol in ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG"]:
                 try:
                     price = data["RAW"][symbol]["USD"]["PRICE"]
                     change = data["RAW"][symbol]["USD"]["CHANGE24HOUR"]
                     _cache["crypto"][symbol] = {"price": price, "change": change}
-                    if symbol == "EUR":
-                        eur_usd_rate = price
                 except KeyError:
                     pass
     except Exception as e:
         logger.error(f"Error fetching crypto data: {e}")
 
-    # 2. Fetch WTI (Alpha Vantage)
+    # 2. Fetch Forex (FloatRates - Free, No Key)
+    try:
+        url = "http://www.floatrates.com/daily/usd.json"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            if "rub" in d:
+                usd_rub = float(d["rub"]["rate"])
+                # FloatRates gives inverse rate sometimes? No, rate is per 1 USD.
+                # Change? FloatRates gives 'inverseRate', 'date'. No 24h change.
+                # We'll assume 0 change or calculate if we had history.
+                _cache["forex"]["USD"] = {"price": usd_rub, "change": 0}
+                
+                if "eur" in d:
+                    usd_eur = float(d["eur"]["rate"])
+                    # EUR/RUB = USD/RUB / USD/EUR
+                    eur_rub = usd_rub / usd_eur
+                    _cache["forex"]["EUR"] = {"price": eur_rub, "change": 0}
+    except Exception as e:
+        logger.error(f"FloatRates error: {e}")
+
+    # 3. Fetch WTI (Alpha Vantage)
     wti_data = get_av_data("WTI")
     if wti_data and "data" in wti_data and len(wti_data["data"]) > 0:
         latest = wti_data["data"][0]
@@ -113,26 +131,13 @@ def update_cache():
     
     time.sleep(15) # Rate limit delay
 
-    # 3. Fetch Brent (Alpha Vantage)
+    # 4. Fetch Brent (Alpha Vantage)
     brent_data = get_av_data("BRENT")
     if brent_data and "data" in brent_data and len(brent_data["data"]) > 0:
         latest = brent_data["data"][0]
         price = float(latest["value"])
         prev = float(brent_data["data"][1]["value"]) if len(brent_data["data"]) > 1 else price
         _cache["oil"]["Brent"] = {"price": price, "change": price - prev}
-
-    time.sleep(15) # Rate limit delay
-
-    # 4. Fetch USD/RUB (Alpha Vantage)
-    av_forex = get_av_data("CURRENCY_EXCHANGE_RATE", from_curr="USD", to_curr="RUB")
-    if av_forex and "Realtime Currency Exchange Rate" in av_forex:
-        rate = av_forex["Realtime Currency Exchange Rate"]
-        usd_rub = float(rate["5. Exchange Rate"])
-        _cache["forex"]["USD"] = {"price": usd_rub, "change": 0}
-        
-        # Calculate EUR/RUB
-        if eur_usd_rate:
-            _cache["forex"]["EUR"] = {"price": usd_rub * eur_usd_rate, "change": 0}
 
     _cache["last_updated"] = time.time()
     logger.info("Price cache updated.")

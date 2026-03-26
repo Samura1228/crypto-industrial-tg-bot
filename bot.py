@@ -45,14 +45,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for the /start command.
     """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    # Get current UTC time
+    current_utc_time = datetime.now(pytz.utc).time()
+    
+    # Add subscription to database
+    database.add_subscription(user_id, chat_id, current_utc_time, 'UTC')
+    
+    # Schedule the daily job
+    context.job_queue.run_daily(
+        send_daily_notification_job,
+        time=current_utc_time,
+        chat_id=chat_id,
+        name=str(user_id),
+        data=user_id
+    )
+    
+    time_str = current_utc_time.strftime('%H:%M')
+
     await update.message.reply_text(
         "👋 **Welcome to the Market Notifier Bot!**\n\n"
         "I can send you daily updates on Crypto, Metals, Oil, and Currencies.\n\n"
+        f"✅ **Auto-Subscription Added!**\n"
+        f"You have been automatically subscribed to receive daily updates at this exact time ({time_str} UTC).\n\n"
         "Use /subscriptions to manage your notifications.\n"
         "Use /price to get current prices immediately."
     )
     # Send immediate update
-    await send_price_update(update.effective_chat.id, context)
+    await send_price_update(chat_id, context)
 
 async def send_price_update(chat_id, context):
     """Helper to send price update."""
