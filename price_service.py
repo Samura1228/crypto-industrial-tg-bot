@@ -53,26 +53,23 @@ def get_arrow(change):
     except (ValueError, TypeError):
         return ""
 
-def get_av_data(function, symbol=None, from_curr=None, to_curr=None):
-    """Helper to fetch data from Alpha Vantage with error handling."""
-    if not AV_API_KEY: return None
-    
-    url = f"https://www.alphavantage.co/query?function={function}&apikey={AV_API_KEY}"
-    if symbol: url += f"&symbol={symbol}"
-    if from_curr: url += f"&from_currency={from_curr}"
-    if to_curr: url += f"&to_currency={to_curr}"
-    if function in ["WTI", "BRENT"]: url += "&interval=daily"
-    
+def get_yfinance_data(symbol):
+    """Helper to fetch data from Yahoo Finance."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        r = requests.get(url)
-        d = r.json()
-        if "Note" in d:
-            logger.warning(f"Alpha Vantage Rate Limit: {d['Note']}")
-            return None
-        return d
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            meta = data["chart"]["result"][0]["meta"]
+            price = float(meta["regularMarketPrice"])
+            prev = float(meta["previousClose"])
+            return {"price": price, "change": price - prev}
+        else:
+            logger.warning(f"Yahoo Finance returned status code {r.status_code} for {symbol}")
     except Exception as e:
-        logger.error(f"Alpha Vantage error: {e}")
-        return None
+        logger.error(f"Yahoo Finance error for {symbol}: {e}")
+    return None
 
 def update_cache():
     """
@@ -121,23 +118,15 @@ def update_cache():
     except Exception as e:
         logger.error(f"FloatRates error: {e}")
 
-    # 3. Fetch WTI (Alpha Vantage)
-    wti_data = get_av_data("WTI")
-    if wti_data and "data" in wti_data and len(wti_data["data"]) > 0:
-        latest = wti_data["data"][0]
-        price = float(latest["value"])
-        prev = float(wti_data["data"][1]["value"]) if len(wti_data["data"]) > 1 else price
-        _cache["oil"]["WTI"] = {"price": price, "change": price - prev}
+    # 3. Fetch WTI (Yahoo Finance)
+    wti_data = get_yfinance_data("CL=F")
+    if wti_data:
+        _cache["oil"]["WTI"] = wti_data
     
-    time.sleep(15) # Rate limit delay
-
-    # 4. Fetch Brent (Alpha Vantage)
-    brent_data = get_av_data("BRENT")
-    if brent_data and "data" in brent_data and len(brent_data["data"]) > 0:
-        latest = brent_data["data"][0]
-        price = float(latest["value"])
-        prev = float(brent_data["data"][1]["value"]) if len(brent_data["data"]) > 1 else price
-        _cache["oil"]["Brent"] = {"price": price, "change": price - prev}
+    # 4. Fetch Brent (Yahoo Finance)
+    brent_data = get_yfinance_data("BZ=F")
+    if brent_data:
+        _cache["oil"]["Brent"] = brent_data
 
     _cache["last_updated"] = time.time()
     logger.info("Price cache updated.")
