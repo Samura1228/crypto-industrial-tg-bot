@@ -31,6 +31,7 @@ SELECT_TIMEZONE, SELECT_TIME = range(2)
 
 # Common timezones map
 TIMEZONES = {
+    "Nicosia (UTC+3)": "Asia/Nicosia",
     "London (UTC+0)": "Europe/London",
     "Central Europe (UTC+1)": "Europe/Paris",
     "Moscow (UTC+3)": "Europe/Moscow",
