@@ -20,9 +20,25 @@ API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
 AV_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 BASE_URL = "https://min-api.cryptocompare.com/data/pricemultifull"
 
+# Asset Registry — canonical list of all tracked assets
+ASSET_REGISTRY = [
+    {"key": "BTC",     "emoji": "₿",  "label": "Bitcoin (BTC)",    "category": "Crypto",      "currency_symbol": "$"},
+    {"key": "ETH",     "emoji": "💎", "label": "Ethereum (ETH)",   "category": "Crypto",      "currency_symbol": "$"},
+    {"key": "TON",     "emoji": "💎", "label": "Toncoin (TON)",    "category": "Crypto",      "currency_symbol": "$"},
+    {"key": "SOL",     "emoji": "☀️", "label": "Solana (SOL)",     "category": "Crypto",      "currency_symbol": "$"},
+    {"key": "PAXG",    "emoji": "🟡", "label": "Gold (PAXG)",      "category": "Metals (1 oz)", "currency_symbol": "$"},
+    {"key": "KAG",     "emoji": "⚪", "label": "Silver (KAG)",     "category": "Metals (1 oz)", "currency_symbol": "$"},
+    {"key": "WTI",     "emoji": "🛢️", "label": "WTI Crude",        "category": "Oil (Barrel)", "currency_symbol": "$"},
+    {"key": "BRENT",   "emoji": "🛢️", "label": "Brent Crude",      "category": "Oil (Barrel)", "currency_symbol": "$"},
+    {"key": "USD_RUB", "emoji": "🇺🇸", "label": "USD/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
+    {"key": "EUR_RUB", "emoji": "🇪🇺", "label": "EUR/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
+]
+
+ALL_ASSET_KEYS = [a["key"] for a in ASSET_REGISTRY]
+
 # Cache to avoid rate limits
 # Cache for 30 minutes
-CACHE_DURATION = 1800 
+CACHE_DURATION = 1800
 _cache = {
     "crypto": {},
     "oil": {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}},
@@ -131,43 +147,69 @@ def update_cache():
     _cache["last_updated"] = time.time()
     logger.info("Price cache updated.")
 
-def get_prices():
-    """
-    Returns the formatted message from cache.
-    If cache is empty, triggers an update (blocking).
-    """
-    if _cache["last_updated"] == 0:
-        update_cache()
-    
+def _get_asset_price_data(key):
+    """Maps an asset key to its cached price data."""
     c = _cache["crypto"]
     o = _cache["oil"]
     f = _cache["forex"]
+    mapping = {
+        "BTC": c.get("BTC"),
+        "ETH": c.get("ETH"),
+        "TON": c.get("TON"),
+        "SOL": c.get("SOL"),
+        "PAXG": c.get("PAXG"),
+        "KAG": c.get("KAG"),
+        "WTI": o.get("WTI"),
+        "BRENT": o.get("Brent"),
+        "USD_RUB": f.get("USD"),
+        "EUR_RUB": f.get("EUR"),
+    }
+    return mapping.get(key)
+
+def get_filtered_prices(asset_keys):
+    """
+    Returns formatted message with only the specified assets.
+    Category headers are only shown if at least one asset in that category is selected.
+    """
+    if _cache["last_updated"] == 0:
+        update_cache()
 
     def p(data, currency_symbol="$"):
-        if not data or data.get("price") is None: return "N/A"
+        if not data or data.get("price") is None:
+            return "N/A"
         price = format_price(data.get("price"), currency_symbol)
         arrow = get_arrow(data.get("change"))
         return f"{price}{arrow}"
 
-    message = (
-        "📊 **Daily Market Update** 📊\n\n"
-        "**Crypto:**\n"
-        f"₿ **Bitcoin (BTC):** {p(c.get('BTC'))}\n"
-        f"💎 **Ethereum (ETH):** {p(c.get('ETH'))}\n"
-        f"💎 **Toncoin (TON):** {p(c.get('TON'))}\n"
-        f"☀️ **Solana (SOL):** {p(c.get('SOL'))}\n\n"
-        "**Metals (1 oz):**\n"
-        f"🟡 **Gold (PAXG):** {p(c.get('PAXG'))}\n"
-        f"⚪ **Silver (KAG):** {p(c.get('KAG'))}\n\n"
-        "**Oil (Barrel):**\n"
-        f"🛢️ **WTI Crude:** {p(o.get('WTI'))}\n"
-        f"🛢️ **Brent Crude:** {p(o.get('Brent'))}\n\n"
-        "**Currencies (RUB):**\n"
-        f"🇺🇸 **USD/RUB:** {p(f.get('USD'), '₽')}\n"
-        f"🇪🇺 **EUR/RUB:** {p(f.get('EUR'), '₽')}\n"
-    )
+    asset_keys_set = set(asset_keys)
     
+    # Group assets by category, preserving registry order
+    from collections import OrderedDict
+    categories = OrderedDict()
+    for asset in ASSET_REGISTRY:
+        if asset["key"] in asset_keys_set:
+            cat = asset["category"]
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(asset)
+
+    message = "📊 **Daily Market Update** 📊\n\n"
+    
+    for cat, assets in categories.items():
+        message += f"**{cat}:**\n"
+        for asset in assets:
+            data = _get_asset_price_data(asset["key"])
+            price_str = p(data, asset["currency_symbol"])
+            message += f"{asset['emoji']} **{asset['label']}:** {price_str}\n"
+        message += "\n"
+
     return message
+
+def get_prices():
+    """
+    Returns formatted message with ALL assets (backward compatible).
+    """
+    return get_filtered_prices(ALL_ASSET_KEYS)
 
 if __name__ == "__main__":
     print(get_prices())

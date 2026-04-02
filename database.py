@@ -43,6 +43,18 @@ def init_db():
             )
         ''')
         
+        # Create user asset preferences table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_asset_preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, asset_key)
+            )
+        ''')
+        
         # Check if old table exists and migrate
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='subscriptions'")
         if cursor.fetchone():
@@ -169,3 +181,70 @@ def get_all_subscriptions():
             conn.close()
     
     return subscriptions
+def save_user_assets(user_id: int, asset_keys: list):
+    """Save user's selected assets. Deletes old preferences and inserts new ones."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Delete existing preferences for this user
+        cursor.execute('DELETE FROM user_asset_preferences WHERE user_id = ?', (user_id,))
+        
+        # Insert new preferences
+        for key in asset_keys:
+            cursor.execute(
+                'INSERT INTO user_asset_preferences (user_id, asset_key, enabled) VALUES (?, ?, 1)',
+                (user_id, key)
+            )
+        
+        conn.commit()
+        logger.info(f"Saved {len(asset_keys)} asset preferences for user {user_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error saving user assets: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def get_user_assets(user_id: int):
+    """
+    Get user's enabled asset keys.
+    Returns list of asset_key strings, or None if no preferences exist (backward compat).
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT asset_key FROM user_asset_preferences WHERE user_id = ? AND enabled = 1',
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return None
+        return [row[0] for row in rows]
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching user assets: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def has_asset_preferences(user_id: int) -> bool:
+    """Check if user has any asset preferences configured."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT COUNT(*) FROM user_asset_preferences WHERE user_id = ?',
+            (user_id,)
+        )
+        count = cursor.fetchone()[0]
+        return count > 0
+    except sqlite3.Error as e:
+        logger.error(f"Error checking user asset preferences: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
