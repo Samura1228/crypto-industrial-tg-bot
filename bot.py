@@ -582,6 +582,7 @@ if __name__ == '__main__':
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True,
     )
 
     # ConversationHandler for /settings (asset selection only)
