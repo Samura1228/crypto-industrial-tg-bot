@@ -899,11 +899,14 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if new_status not in ('member', 'administrator'):
         return
 
-    # Ignore if old status was already member/admin (e.g., permissions change)
-    if old_status in ('member', 'administrator'):
-        # But DO handle member -> administrator (might now have pin permissions)
-        if not (old_status == 'member' and new_status == 'administrator'):
-            return
+    # Only process when bot is ADDED to group (not promoted/permissions changed)
+    # old_status should be 'left', 'kicked', or 'banned' (non-member states)
+    if old_status not in ('left', 'kicked', 'banned'):
+        logger.info(
+            f"Ignoring non-addition transition {old_status} -> {new_status} "
+            f"in chat {my_member.chat.id}"
+        )
+        return
 
     group_chat_id = my_member.chat.id
     adder_user_id = my_member.from_user.id
