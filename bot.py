@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# In-memory deduplication for group addition events.
+# Telegram may send multiple left→member events simultaneously when the bot
+# is added to a group, causing a race condition.  We track (user_id, group_chat_id)
+# tuples so only the first event is processed.
+_processed_group_additions: set[tuple[int, int]] = set()
+
 # States for ConversationHandler (legacy add-subscription flow)
 SELECT_TIMEZONE, SELECT_TIME = range(2)
 
@@ -846,6 +852,9 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         pinned = await _activate_group_board(board, user_id, context)
 
+        # Clean up the dedup entry now that the board is fully activated
+        _processed_group_additions.discard((user_id, group_chat_id))
+
         pin_status = "📌 Message pinned!" if pinned else "⚠️ Could not pin the message — please check my pin permissions."
         await update.message.reply_text(
             f"✅ **Group Price Board is live!**\n\n"
@@ -911,6 +920,18 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
     group_chat_id = my_member.chat.id
     adder_user_id = my_member.from_user.id
     group_name = my_member.chat.title or 'Unknown'
+
+    # --- In-memory deduplication ---
+    # Telegram can fire two left→member events almost simultaneously.
+    # The set check + add is synchronous so no await can interleave.
+    dedup_key = (adder_user_id, group_chat_id)
+    if dedup_key in _processed_group_additions:
+        logger.info(
+            f"Ignoring duplicate group addition event for user {adder_user_id} "
+            f"in group {group_chat_id} ({old_status} -> {new_status})"
+        )
+        return
+    _processed_group_additions.add(dedup_key)
 
     logger.info(
         f"Bot added to group {group_chat_id} by user {adder_user_id} "
