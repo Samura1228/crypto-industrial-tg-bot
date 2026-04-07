@@ -473,22 +473,67 @@ def update_pinned_message_id(board_id: int, message_id: int):
 
 
 def cancel_pending_boards(user_id: int):
-    """Cancel any existing pending boards for a user."""
+    """Cancel any existing pending or awaiting_admin boards for a user."""
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE group_price_boards SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP "
-            "WHERE user_id = ? AND status = 'pending'",
+            "WHERE user_id = ? AND status IN ('pending', 'awaiting_admin')",
             (user_id,)
         )
         conn.commit()
         affected = cursor.rowcount
         if affected > 0:
-            logger.info(f"Cancelled {affected} pending board(s) for user {user_id}")
+            logger.info(f"Cancelled {affected} pending/awaiting_admin board(s) for user {user_id}")
     except sqlite3.Error as e:
         logger.error(f"Error cancelling pending boards for user {user_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def set_board_awaiting_admin(board_id: int, group_chat_id: int):
+    """Update a pending board with the group_chat_id and set status to 'awaiting_admin'."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE group_price_boards SET group_chat_id = ?, status = 'awaiting_admin', "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (group_chat_id, board_id)
+        )
+        conn.commit()
+        logger.info(f"Board {board_id} set to awaiting_admin with group_chat_id={group_chat_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error setting board {board_id} to awaiting_admin: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_awaiting_admin_board_for_user(user_id: int):
+    """Get the most recent awaiting_admin board for a user.
+    Returns dict with keys: id, user_id, group_chat_id, asset_keys, status, etc., or None."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM group_price_boards WHERE user_id = ? AND status = 'awaiting_admin' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching awaiting_admin board for user {user_id}: {e}")
+        return None
     finally:
         if conn:
             conn.close()

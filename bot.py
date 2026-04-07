@@ -709,6 +709,147 @@ async def gp_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ---------------------------------------------------------------------------
+# "Ready" handler — user confirms bot has been made admin
+# ---------------------------------------------------------------------------
+
+async def _activate_group_board(board: dict, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Shared helper: send price message to group, pin it, activate board, schedule job.
+
+    Parameters
+    ----------
+    board : dict
+        The awaiting_admin board row from the database.
+    user_id : int
+        The user who owns the board.
+    context : ContextTypes.DEFAULT_TYPE
+
+    Returns
+    -------
+    bool
+        True if activation succeeded, False otherwise.
+    """
+    group_chat_id = board['group_chat_id']
+    asset_keys = board['asset_keys'].split(',')
+
+    # Generate the price message
+    price_message = format_group_price_message(asset_keys)
+
+    # Send the message to the group
+    sent_message = await context.bot.send_message(
+        chat_id=group_chat_id,
+        text=price_message,
+        parse_mode='Markdown'
+    )
+
+    # Pin the message
+    pinned = False
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=group_chat_id,
+            message_id=sent_message.message_id,
+            disable_notification=True
+        )
+        pinned = True
+    except Exception as pin_error:
+        logger.warning(f"Could not pin message in group {group_chat_id}: {pin_error}")
+
+    # Activate the board in the database
+    database.activate_group_price_board(
+        board_id=board['id'],
+        group_chat_id=group_chat_id,
+        pinned_message_id=sent_message.message_id
+    )
+
+    # Schedule the hourly update job
+    context.job_queue.run_repeating(
+        update_group_price_board_job,
+        interval=3600,
+        first=3600,
+        chat_id=group_chat_id,
+        name=f"gp_{board['id']}",
+        data={
+            'board_id': board['id'],
+            'group_chat_id': group_chat_id,
+            'message_id': sent_message.message_id,
+            'asset_keys': asset_keys,
+        }
+    )
+
+    return pinned
+
+
+async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the user sending 'Ready' in private chat after making the bot admin.
+
+    Works both inside the GP_WAITING_FOR_GROUP conversation state and as a
+    standalone handler (after conversation timeout).
+    """
+    user_id = update.effective_user.id
+
+    # Only for new-flow users
+    if not is_new_flow_user(user_id):
+        return
+
+    # Check if user has an awaiting_admin board
+    board = database.get_awaiting_admin_board_for_user(user_id)
+    if board is None:
+        await update.message.reply_text(
+            "ℹ️ You don't have a pending group price board.\n"
+            "Use /groupprice to set one up.",
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
+    group_chat_id = board['group_chat_id']
+
+    # Check if the bot is an admin in the group
+    try:
+        bot_member = await context.bot.get_chat_member(group_chat_id, context.bot.id)
+        is_admin = bot_member.status == 'administrator'
+    except Exception as e:
+        logger.warning(f"Could not check bot admin status in group {group_chat_id}: {e}")
+        await update.message.reply_text(
+            "❌ I couldn't check my status in the group. "
+            "Please make sure I'm still a member of the group and try again by sending **Ready**.",
+            parse_mode='Markdown'
+        )
+        return GP_WAITING_FOR_GROUP
+
+    if not is_admin:
+        await update.message.reply_text(
+            "⚠️ I'm not an admin in the group yet.\n\n"
+            "Please make me an admin with permission to pin messages, "
+            "then try again by sending **Ready**.",
+            parse_mode='Markdown'
+        )
+        return GP_WAITING_FOR_GROUP
+
+    # Bot IS an admin — activate the board
+    try:
+        pinned = await _activate_group_board(board, user_id, context)
+
+        pin_status = "📌 Message pinned!" if pinned else "⚠️ Could not pin the message — please check my pin permissions."
+        await update.message.reply_text(
+            f"✅ **Group Price Board is live!**\n\n"
+            f"{pin_status}\n\n"
+            f"The prices will update automatically every hour.",
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.error(f"Error activating group price board: {e}")
+        await update.message.reply_text(
+            f"❌ **Failed to set up the price board.**\n\n"
+            f"Error: {str(e)}\n\n"
+            "Please make sure I have permission to send messages in the group.\n"
+            "Use /groupprice to try again.",
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
 # ChatMemberUpdated handler — detect bot added to group
 # ---------------------------------------------------------------------------
 
@@ -724,7 +865,11 @@ def format_group_price_message(asset_keys: list) -> str:
 
 
 async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the bot being added to a group chat."""
+    """Handles the bot being added to a group chat.
+
+    For new-flow users: does NOT send/pin immediately. Instead saves the
+    group_chat_id and asks the user to grant admin rights, then send 'Ready'.
+    """
     my_member = update.my_chat_member
     if my_member is None:
         return
@@ -744,6 +889,7 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     group_chat_id = my_member.chat.id
     adder_user_id = my_member.from_user.id
+    group_name = my_member.chat.title or 'Unknown'
 
     logger.info(
         f"Bot added to group {group_chat_id} by user {adder_user_id} "
@@ -757,7 +903,30 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"No pending board for user {adder_user_id}, ignoring.")
         return
 
-    # Parse asset keys from the pending board
+    # --- New flow for gated users: don't send/pin yet, ask for admin first ---
+    if is_new_flow_user(adder_user_id):
+        # Save group_chat_id and transition to 'awaiting_admin'
+        database.set_board_awaiting_admin(pending['id'], group_chat_id)
+
+        # Send private message to the user
+        try:
+            await context.bot.send_message(
+                chat_id=adder_user_id,
+                text=(
+                    f"✅ I've been added to the group **{group_name}**!\n\n"
+                    "Now please:\n"
+                    "1️⃣ Make me an admin in the group\n"
+                    "2️⃣ Give me permission to pin messages\n"
+                    "3️⃣ When you're done, send me the message: **Ready**"
+                ),
+                parse_mode='Markdown'
+            )
+        except Exception as notify_error:
+            logger.warning(f"Could not notify user {adder_user_id}: {notify_error}")
+
+        return
+
+    # --- Legacy flow: send and pin immediately (original behaviour) ---
     asset_keys = pending['asset_keys'].split(',')
 
     try:
@@ -812,7 +981,7 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 chat_id=adder_user_id,
                 text=(
                     f"✅ **Group Price Board is live!**\n\n"
-                    f"Group: {my_member.chat.title or 'Unknown'}\n"
+                    f"Group: {group_name}\n"
                     f"{pin_status}\n\n"
                     f"The prices will update automatically every hour."
                 ),
@@ -1030,7 +1199,7 @@ if __name__ == '__main__':
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
-    # ConversationHandler for /groupprice (asset selection → waiting for group addition)
+    # ConversationHandler for /groupprice (asset selection → waiting for group addition → ready)
     groupprice_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('groupprice', groupprice_command)],
         states={
@@ -1039,6 +1208,12 @@ if __name__ == '__main__':
                 CallbackQueryHandler(asset_confirm_handler, pattern=r'^asset_confirm$'),
             ],
             GP_WAITING_FOR_GROUP: [
+                # "Ready" (case-insensitive) triggers admin check & activation
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)^ready$'),
+                    ready_handler,
+                ),
+                # Any other text → reminder
                 MessageHandler(filters.TEXT & ~filters.COMMAND, gp_waiting_reminder),
             ],
             ConversationHandler.TIMEOUT: [
@@ -1058,6 +1233,16 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('subscriptions', subscriptions_command))
     application.add_handler(CallbackQueryHandler(remove_single_sub, pattern=r'^remove_sub:'))
     application.add_handler(CallbackQueryHandler(remove_all_subs, pattern=r'^remove_all$'))
+
+    # Standalone "Ready" handler — catches "ready" in private chat AFTER the
+    # groupprice conversation has timed out (conversation handlers take priority
+    # when active, so this only fires when no conversation is in progress).
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)^ready$'),
+            ready_handler,
+        )
+    )
 
     # ChatMemberHandler for detecting bot added to groups
     application.add_handler(
