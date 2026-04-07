@@ -54,6 +54,20 @@ def init_db():
                 UNIQUE(user_id, asset_key)
             )
         ''')
+
+        # Create group price boards table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS group_price_boards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                group_chat_id INTEGER,
+                pinned_message_id INTEGER,
+                asset_keys TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         # Check if old table exists and migrate
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='subscriptions'")
@@ -290,6 +304,191 @@ def has_asset_preferences(user_id: int) -> bool:
     except sqlite3.Error as e:
         logger.error(f"Error checking user asset preferences: {e}")
         return False
+    finally:
+        if conn:
+            conn.close()
+
+# ---------------------------------------------------------------------------
+# Group Price Board functions
+# ---------------------------------------------------------------------------
+
+def create_group_price_board(user_id: int, asset_keys: list) -> int:
+    """Insert a new pending group price board. Cancels any existing pending boards first.
+    Returns the row id."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Cancel any existing pending boards for this user
+        cursor.execute(
+            "UPDATE group_price_boards SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = ? AND status = 'pending'",
+            (user_id,)
+        )
+
+        # Insert new pending board
+        asset_keys_str = ','.join(asset_keys)
+        cursor.execute(
+            "INSERT INTO group_price_boards (user_id, asset_keys, status) VALUES (?, ?, 'pending')",
+            (user_id, asset_keys_str)
+        )
+        conn.commit()
+        board_id = cursor.lastrowid
+        logger.info(f"Created group price board {board_id} for user {user_id} with {len(asset_keys)} assets")
+        return board_id
+    except sqlite3.Error as e:
+        logger.error(f"Error creating group price board: {e}")
+        return -1
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_pending_board_for_user(user_id: int):
+    """Get the most recent pending board for a user.
+    Returns dict with keys: id, user_id, asset_keys, status, created_at, or None."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM group_price_boards WHERE user_id = ? AND status = 'pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching pending board for user {user_id}: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def activate_group_price_board(board_id: int, group_chat_id: int, pinned_message_id: int):
+    """Activate a pending board: set status to 'active', fill in group_chat_id and pinned_message_id."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE group_price_boards SET status = 'active', group_chat_id = ?, "
+            "pinned_message_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (group_chat_id, pinned_message_id, board_id)
+        )
+        conn.commit()
+        logger.info(f"Activated group price board {board_id} for group {group_chat_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error activating group price board {board_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_active_boards():
+    """Get all active group price boards (for job restoration on startup).
+    Returns list of dicts."""
+    boards = []
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM group_price_boards WHERE status = 'active'")
+        rows = cursor.fetchall()
+        boards = [dict(row) for row in rows]
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching active boards: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return boards
+
+
+def get_board_by_group(group_chat_id: int):
+    """Look up the active board for a specific group chat.
+    Returns dict or None."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM group_price_boards WHERE group_chat_id = ? AND status = 'active' LIMIT 1",
+            (group_chat_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching board for group {group_chat_id}: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def deactivate_board(board_id: int):
+    """Set a board's status to 'inactive'."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE group_price_boards SET status = 'inactive', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (board_id,)
+        )
+        conn.commit()
+        logger.info(f"Deactivated group price board {board_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error deactivating board {board_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_pinned_message_id(board_id: int, message_id: int):
+    """Update the pinned message ID for a board."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE group_price_boards SET pinned_message_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (message_id, board_id)
+        )
+        conn.commit()
+        logger.info(f"Updated pinned message ID for board {board_id} to {message_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error updating pinned message ID for board {board_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def cancel_pending_boards(user_id: int):
+    """Cancel any existing pending boards for a user."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE group_price_boards SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = ? AND status = 'pending'",
+            (user_id,)
+        )
+        conn.commit()
+        affected = cursor.rowcount
+        if affected > 0:
+            logger.info(f"Cancelled {affected} pending board(s) for user {user_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Error cancelling pending boards for user {user_id}: {e}")
     finally:
         if conn:
             conn.close()

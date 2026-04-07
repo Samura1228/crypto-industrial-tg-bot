@@ -3,10 +3,12 @@ import logging
 import asyncio
 from datetime import time, datetime, timedelta
 import pytz
+import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler, JobQueue, 
-    CallbackQueryHandler, MessageHandler, filters, ConversationHandler
+    ApplicationBuilder, ContextTypes, CommandHandler, JobQueue,
+    CallbackQueryHandler, MessageHandler, filters, ConversationHandler,
+    ChatMemberHandler
 )
 from dotenv import load_dotenv
 
@@ -35,6 +37,10 @@ START_ASSET_SELECTION, START_SELECT_TIMEZONE, START_SELECT_TIME = range(10, 13)
 
 # States for /settings conversation flow
 SETTINGS_ASSET_SELECTION = 20
+
+# States for /groupprice conversation flow
+GP_ASSET_SELECTION = 30
+GP_WAITING_FOR_GROUP = 31
 
 # Test user IDs that get the new flow
 NEW_FLOW_USER_IDS = {6840070959}
@@ -249,6 +255,35 @@ async def asset_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode='Markdown'
         )
         return ConversationHandler.END
+
+    if flow == 'groupprice':
+        # Group price board flow: save pending board, show instructions
+        board_id = database.create_group_price_board(user_id, list(selected))
+        context.user_data['_gp_board_id'] = board_id
+
+        # Build asset summary
+        asset_names = []
+        for asset in ASSET_REGISTRY:
+            if asset["key"] in selected:
+                asset_names.append(f"{asset['emoji']} {asset['label']}")
+        asset_list = "\n".join(asset_names)
+
+        await query.edit_message_text(
+            f"✅ **{len(selected)} assets selected for group board:**\n\n"
+            f"{asset_list}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📋 **Now follow these steps:**\n\n"
+            "1️⃣ **Create a group** (or open an existing one)\n\n"
+            "2️⃣ **Add me to the group:**\n"
+            "   Search for `@notifiercrypto_ind_bot` and add me\n\n"
+            "3️⃣ **Make me an admin** with these permissions:\n"
+            "   • ✅ Send messages\n"
+            "   • ✅ Pin messages\n\n"
+            "⏳ I'm waiting for you to add me to a group...\n"
+            "Once you do, I'll automatically send and pin the price board!",
+            parse_mode='Markdown'
+        )
+        return GP_WAITING_FOR_GROUP
 
     # Start flow: proceed to timezone selection
     keyboard = build_timezone_keyboard()
@@ -595,6 +630,260 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
 
+# ---------------------------------------------------------------------------
+# /groupprice command and related handlers
+# ---------------------------------------------------------------------------
+
+async def groupprice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /groupprice — sets up a live price board in a group."""
+    user_id = update.effective_user.id
+
+    # Gate check
+    if not is_new_flow_user(user_id):
+        await update.message.reply_text("This command is not available yet.")
+        return ConversationHandler.END
+
+    # Only works in private chat
+    if update.effective_chat.type != 'private':
+        await update.message.reply_text(
+            "⚠️ Please use /groupprice in a private chat with me, not in a group."
+        )
+        return ConversationHandler.END
+
+    # Explain the feature
+    await update.message.reply_text(
+        "📌 **Group Price Board**\n\n"
+        "This feature lets you set up a **live-updating pinned message** "
+        "in a Telegram group that shows current market prices.\n\n"
+        "**How it works:**\n"
+        "1️⃣ You choose which assets to display\n"
+        "2️⃣ You add me to a group and make me admin\n"
+        "3️⃣ I'll send and pin a price message\n"
+        "4️⃣ I'll update it every hour automatically\n\n"
+        "Let's start by choosing your assets! 👇",
+        parse_mode='Markdown'
+    )
+
+    # Cancel any existing pending boards for this user
+    database.cancel_pending_boards(user_id)
+
+    # Initialize asset selection — pre-populate with existing preferences or all
+    existing = database.get_user_assets(user_id)
+    if existing is not None:
+        context.user_data['selected_assets'] = set(existing)
+    else:
+        context.user_data['selected_assets'] = set(ALL_ASSET_KEYS)
+
+    # Mark flow context for shared handlers
+    context.user_data['_asset_flow'] = 'groupprice'
+    context.user_data['_asset_selection_state'] = GP_ASSET_SELECTION
+
+    # Show asset selection keyboard (reuse existing)
+    keyboard = build_asset_keyboard(context.user_data['selected_assets'])
+    await update.message.reply_text(
+        "📊 **Select assets for the group price board:**\n"
+        "Tap to toggle on/off, then press Confirm.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    return GP_ASSET_SELECTION
+
+
+async def gp_waiting_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remind user we're waiting for them to add the bot to a group."""
+    await update.message.reply_text(
+        "⏳ I'm still waiting for you to add me to a group.\n\n"
+        "Follow the steps above, and I'll automatically detect when you add me!\n\n"
+        "Use /cancel to abort.",
+        parse_mode='Markdown'
+    )
+    return GP_WAITING_FOR_GROUP
+
+
+async def gp_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle conversation timeout for groupprice flow."""
+    if update.effective_user:
+        user_id = update.effective_user.id
+        database.cancel_pending_boards(user_id)
+    return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
+# ChatMemberUpdated handler — detect bot added to group
+# ---------------------------------------------------------------------------
+
+def format_group_price_message(asset_keys: list) -> str:
+    """Format the price message for a group price board."""
+    message = price_service.get_filtered_prices(asset_keys)
+
+    # Add a footer with the last update time
+    now = datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M UTC')
+    message += f"🔄 _Last updated: {now}_"
+
+    return message
+
+
+async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the bot being added to a group chat."""
+    my_member = update.my_chat_member
+    if my_member is None:
+        return
+
+    old_status = my_member.old_chat_member.status
+    new_status = my_member.new_chat_member.status
+
+    # We only care about transitions TO member or administrator
+    if new_status not in ('member', 'administrator'):
+        return
+
+    # Ignore if old status was already member/admin (e.g., permissions change)
+    if old_status in ('member', 'administrator'):
+        # But DO handle member -> administrator (might now have pin permissions)
+        if not (old_status == 'member' and new_status == 'administrator'):
+            return
+
+    group_chat_id = my_member.chat.id
+    adder_user_id = my_member.from_user.id
+
+    logger.info(
+        f"Bot added to group {group_chat_id} by user {adder_user_id} "
+        f"(status: {old_status} -> {new_status})"
+    )
+
+    # Check if this user has a pending group price board
+    pending = database.get_pending_board_for_user(adder_user_id)
+
+    if pending is None:
+        logger.info(f"No pending board for user {adder_user_id}, ignoring.")
+        return
+
+    # Parse asset keys from the pending board
+    asset_keys = pending['asset_keys'].split(',')
+
+    try:
+        # Generate the price message
+        price_message = format_group_price_message(asset_keys)
+
+        # Send the message to the group
+        sent_message = await context.bot.send_message(
+            chat_id=group_chat_id,
+            text=price_message,
+            parse_mode='Markdown'
+        )
+
+        # Try to pin the message
+        pinned = False
+        try:
+            await context.bot.pin_chat_message(
+                chat_id=group_chat_id,
+                message_id=sent_message.message_id,
+                disable_notification=True
+            )
+            pinned = True
+        except Exception as pin_error:
+            logger.warning(f"Could not pin message in group {group_chat_id}: {pin_error}")
+
+        # Activate the board in the database
+        database.activate_group_price_board(
+            board_id=pending['id'],
+            group_chat_id=group_chat_id,
+            pinned_message_id=sent_message.message_id
+        )
+
+        # Schedule the hourly update job
+        context.job_queue.run_repeating(
+            update_group_price_board_job,
+            interval=3600,
+            first=3600,
+            chat_id=group_chat_id,
+            name=f"gp_{pending['id']}",
+            data={
+                'board_id': pending['id'],
+                'group_chat_id': group_chat_id,
+                'message_id': sent_message.message_id,
+                'asset_keys': asset_keys,
+            }
+        )
+
+        # Notify the user in private chat
+        pin_status = "📌 Message pinned!" if pinned else "⚠️ Could not pin the message — please make me an admin with pin permissions."
+        try:
+            await context.bot.send_message(
+                chat_id=adder_user_id,
+                text=(
+                    f"✅ **Group Price Board is live!**\n\n"
+                    f"Group: {my_member.chat.title or 'Unknown'}\n"
+                    f"{pin_status}\n\n"
+                    f"The prices will update automatically every hour."
+                ),
+                parse_mode='Markdown'
+            )
+        except Exception as notify_error:
+            logger.warning(f"Could not notify user {adder_user_id}: {notify_error}")
+
+    except Exception as e:
+        logger.error(f"Error setting up group price board: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=adder_user_id,
+                text=(
+                    f"❌ **Failed to set up the price board.**\n\n"
+                    f"Error: {str(e)}\n\n"
+                    "Please make sure I have permission to send messages in the group.\n"
+                    "Use /groupprice to try again."
+                ),
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+
+
+async def update_group_price_board_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job that edits the pinned message in a group with fresh prices."""
+    job = context.job
+    data = job.data
+    board_id = data['board_id']
+    group_chat_id = data['group_chat_id']
+    message_id = data['message_id']
+    asset_keys = data['asset_keys']
+
+    try:
+        # Generate fresh price message
+        new_text = format_group_price_message(asset_keys)
+
+        # Edit the existing pinned message
+        await context.bot.edit_message_text(
+            chat_id=group_chat_id,
+            message_id=message_id,
+            text=new_text,
+            parse_mode='Markdown'
+        )
+        logger.info(f"Updated group price board {board_id} in chat {group_chat_id}")
+
+    except telegram.error.BadRequest as e:
+        error_msg = str(e).lower()
+        if 'message is not modified' in error_msg:
+            logger.debug(f"Board {board_id}: message not modified (prices unchanged)")
+        elif 'message to edit not found' in error_msg:
+            logger.warning(f"Board {board_id}: pinned message deleted, deactivating")
+            database.deactivate_board(board_id)
+            job.schedule_removal()
+        elif 'chat not found' in error_msg or 'bot was kicked' in error_msg:
+            logger.warning(f"Board {board_id}: bot removed from group, deactivating")
+            database.deactivate_board(board_id)
+            job.schedule_removal()
+        else:
+            logger.error(f"Board {board_id}: BadRequest editing message: {e}")
+
+    except telegram.error.Forbidden as e:
+        logger.warning(f"Board {board_id}: Forbidden — {e}, deactivating")
+        database.deactivate_board(board_id)
+        job.schedule_removal()
+
+    except Exception as e:
+        logger.error(f"Board {board_id}: Unexpected error updating price board: {e}")
+
+
 async def remove_all_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Removes all subscriptions for the user."""
     query = update.callback_query
@@ -657,6 +946,30 @@ async def restore_jobs(context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Restored {count} subscriptions from database.")
 
+async def restore_group_price_boards(context: ContextTypes.DEFAULT_TYPE):
+    """Restores hourly update jobs for active group price boards on startup."""
+    boards = database.get_active_boards()
+    count = 0
+
+    for board in boards:
+        asset_keys = board['asset_keys'].split(',')
+        context.job_queue.run_repeating(
+            update_group_price_board_job,
+            interval=3600,
+            first=60,  # first update 1 minute after startup
+            chat_id=board['group_chat_id'],
+            name=f"gp_{board['id']}",
+            data={
+                'board_id': board['id'],
+                'group_chat_id': board['group_chat_id'],
+                'message_id': board['pinned_message_id'],
+                'asset_keys': asset_keys,
+            }
+        )
+        count += 1
+
+    logger.info(f"Restored {count} group price board jobs from database.")
+
 async def update_price_cache_job(context: ContextTypes.DEFAULT_TYPE):
     """Background job to update price cache periodically."""
     price_service.update_cache()
@@ -717,22 +1030,50 @@ if __name__ == '__main__':
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    # ConversationHandler for /groupprice (asset selection → waiting for group addition)
+    groupprice_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('groupprice', groupprice_command)],
+        states={
+            GP_ASSET_SELECTION: [
+                CallbackQueryHandler(asset_toggle_handler, pattern=r'^asset_toggle_'),
+                CallbackQueryHandler(asset_confirm_handler, pattern=r'^asset_confirm$'),
+            ],
+            GP_WAITING_FOR_GROUP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, gp_waiting_reminder),
+            ],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, gp_timeout_handler),
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=1800,  # 30 minutes
+    )
+
     # Add Handlers (order matters — conversation handlers first)
     application.add_handler(start_conv_handler)
     application.add_handler(settings_conv_handler)
+    application.add_handler(groupprice_conv_handler)
     application.add_handler(add_sub_conv_handler)
     application.add_handler(CommandHandler('price', price_command))
     application.add_handler(CommandHandler('subscriptions', subscriptions_command))
     application.add_handler(CallbackQueryHandler(remove_single_sub, pattern=r'^remove_sub:'))
     application.add_handler(CallbackQueryHandler(remove_all_subs, pattern=r'^remove_all$'))
 
+    # ChatMemberHandler for detecting bot added to groups
+    application.add_handler(
+        ChatMemberHandler(bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
+
     # Restore jobs on startup
     application.job_queue.run_once(restore_jobs, when=0)
+
+    # Restore group price board jobs on startup
+    application.job_queue.run_once(restore_group_price_boards, when=2)
 
     # Schedule background cache update every 15 minutes
     application.job_queue.run_repeating(update_price_cache_job, interval=900, first=1)
 
     logger.info("Bot is starting...")
 
-    # Run the bot
-    application.run_polling()
+    # Run the bot (include all update types for ChatMemberUpdated events)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
