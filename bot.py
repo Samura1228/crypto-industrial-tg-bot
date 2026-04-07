@@ -914,16 +914,23 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"(status: {old_status} -> {new_status})"
     )
 
-    # Check if this user has a pending group price board
+    # Check if this user has a pending or awaiting_admin group price board
     pending = database.get_pending_board_for_user(adder_user_id)
 
     if pending is None:
-        logger.info(f"No pending board for user {adder_user_id}, ignoring.")
+        logger.info(f"No pending/awaiting_admin board for user {adder_user_id}, ignoring.")
         return
 
     # --- New flow for gated users: don't send/pin yet, ask for admin first ---
     if is_new_flow_user(adder_user_id):
-        # Save group_chat_id and transition to 'awaiting_admin'
+        # If board was already awaiting_admin with a different group, log the update
+        if pending['status'] == 'awaiting_admin' and pending.get('group_chat_id') != group_chat_id:
+            logger.info(
+                f"Updating stale group_chat_id for board {pending['id']}: "
+                f"{pending.get('group_chat_id')} -> {group_chat_id}"
+            )
+
+        # Save/update group_chat_id and transition to 'awaiting_admin'
         database.set_board_awaiting_admin(pending['id'], group_chat_id)
 
         # Send private message to the user

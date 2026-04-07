@@ -346,15 +346,21 @@ def create_group_price_board(user_id: int, asset_keys: list) -> int:
 
 
 def get_pending_board_for_user(user_id: int):
-    """Get the most recent pending board for a user.
-    Returns dict with keys: id, user_id, asset_keys, status, created_at, or None."""
+    """Get the most recent pending or awaiting_admin board for a user.
+    Returns dict with keys: id, user_id, asset_keys, status, group_chat_id, created_at, or None.
+
+    This matches both 'pending' (board created, bot not yet added to any group)
+    and 'awaiting_admin' (bot was added to a group but user hasn't confirmed admin yet).
+    The latter case allows the bot to update the group_chat_id if the user removes
+    the bot from one group and adds it to another.
+    """
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM group_price_boards WHERE user_id = ? AND status = 'pending' "
+            "SELECT * FROM group_price_boards WHERE user_id = ? AND status IN ('pending', 'awaiting_admin') "
             "ORDER BY created_at DESC LIMIT 1",
             (user_id,)
         )
@@ -363,7 +369,7 @@ def get_pending_board_for_user(user_id: int):
             return dict(row)
         return None
     except sqlite3.Error as e:
-        logger.error(f"Error fetching pending board for user {user_id}: {e}")
+        logger.error(f"Error fetching pending/awaiting_admin board for user {user_id}: {e}")
         return None
     finally:
         if conn:
