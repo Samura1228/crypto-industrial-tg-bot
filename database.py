@@ -155,6 +155,51 @@ def get_user_subscriptions(user_id: int):
             conn.close()
     return subscriptions
 
+def get_user_subscriptions_with_ids(user_id: int):
+    """Retrieve all subscriptions for a user, including the database row ID."""
+    subscriptions = []
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, notification_time, timezone FROM subscriptions_v2 WHERE user_id = ? ORDER BY id',
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+
+        for row in rows:
+            h, m, s = map(int, row[1].split(':'))
+            subscriptions.append({
+                'id': row[0],
+                'notification_time': time(hour=h, minute=m, second=s),
+                'timezone': row[2]
+            })
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching user subscriptions with IDs: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return subscriptions
+
+def remove_subscription_by_id(subscription_id: int):
+    """Remove a single subscription by its database row ID."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM subscriptions_v2 WHERE id = ?', (subscription_id,))
+        conn.commit()
+        deleted = cursor.rowcount
+        logger.info(f"Removed subscription id={subscription_id} (rows affected: {deleted})")
+        return deleted > 0
+    except sqlite3.Error as e:
+        logger.error(f"Error removing subscription by id: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
 def get_all_subscriptions():
     """Retrieve all active subscriptions for the scheduler."""
     subscriptions = []

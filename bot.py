@@ -389,6 +389,16 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def subscriptions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for /subscriptions command."""
     user_id = update.effective_user.id
+
+    if is_new_flow_user(user_id):
+        await _subscriptions_new_flow(update, context)
+    else:
+        await _subscriptions_legacy_flow(update, context)
+
+
+async def _subscriptions_legacy_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legacy /subscriptions display (unchanged behaviour)."""
+    user_id = update.effective_user.id
     subs = database.get_user_subscriptions(user_id)
 
     text = "📋 **Your Subscriptions:**\n\n"
@@ -406,6 +416,106 @@ async def subscriptions_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+def _build_subscriptions_text_and_keyboard(subs_with_ids: list):
+    """Build the subscription list text and inline keyboard for new-flow users.
+
+    Parameters
+    ----------
+    subs_with_ids : list[dict]
+        Each dict has keys 'id', 'notification_time', 'timezone'.
+
+    Returns
+    -------
+    tuple[str, InlineKeyboardMarkup]
+    """
+    text = "📋 **Your Subscriptions:**\n\n"
+    keyboard = []
+
+    if not subs_with_ids:
+        text += "You have no active subscriptions."
+    else:
+        for i, sub in enumerate(subs_with_ids, 1):
+            t = sub['notification_time'].strftime('%H:%M')
+            tz = sub['timezone']
+            text += f"{i}. {t} ({tz})\n"
+
+        # One remove button per subscription
+        for i, sub in enumerate(subs_with_ids, 1):
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🗑 Remove #{i}",
+                    callback_data=f"remove_sub:{sub['id']}"
+                )
+            ])
+
+        # Remove All button
+        keyboard.append([InlineKeyboardButton("🗑 Remove All", callback_data='remove_all')])
+
+    # Add Subscription button (always shown)
+    keyboard.append([InlineKeyboardButton("➕ Add Subscription", callback_data='add_sub')])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def _subscriptions_new_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """New-flow /subscriptions display with per-subscription remove buttons."""
+    user_id = update.effective_user.id
+    subs = database.get_user_subscriptions_with_ids(user_id)
+    text, reply_markup = _build_subscriptions_text_and_keyboard(subs)
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+
+async def remove_single_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler: remove a single subscription by its DB id."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    # Parse subscription id from callback data  (format: "remove_sub:<id>")
+    try:
+        sub_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        await query.answer("Invalid subscription reference.", show_alert=True)
+        return
+
+    # Determine the display index *before* deletion so we can show a nice message
+    subs_before = database.get_user_subscriptions_with_ids(user_id)
+    display_index = None
+    for i, s in enumerate(subs_before, 1):
+        if s['id'] == sub_id:
+            display_index = i
+            break
+
+    if display_index is None:
+        await query.answer("Subscription not found — it may have been removed already.", show_alert=True)
+        return
+
+    # Remove from database
+    database.remove_subscription_by_id(sub_id)
+
+    # Cancel ALL scheduled jobs for this user, then re-schedule remaining ones
+    current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
+    for job in current_jobs:
+        job.schedule_removal()
+
+    remaining_subs = database.get_user_subscriptions_with_ids(user_id)
+    chat_id = query.message.chat_id
+    for sub in remaining_subs:
+        context.job_queue.run_daily(
+            send_daily_notification_job,
+            time=sub['notification_time'],
+            chat_id=chat_id,
+            name=str(user_id),
+            data=user_id
+        )
+
+    # Refresh the message with updated list and buttons
+    text, reply_markup = _build_subscriptions_text_and_keyboard(remaining_subs)
+    text += f"\n\n✅ Subscription #{display_index} removed."
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def add_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the add subscription flow."""
@@ -613,6 +723,7 @@ if __name__ == '__main__':
     application.add_handler(add_sub_conv_handler)
     application.add_handler(CommandHandler('price', price_command))
     application.add_handler(CommandHandler('subscriptions', subscriptions_command))
+    application.add_handler(CallbackQueryHandler(remove_single_sub, pattern=r'^remove_sub:'))
     application.add_handler(CallbackQueryHandler(remove_all_subs, pattern=r'^remove_all$'))
 
     # Restore jobs on startup
