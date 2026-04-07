@@ -923,7 +923,18 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # --- New flow for gated users: don't send/pin yet, ask for admin first ---
     if is_new_flow_user(adder_user_id):
-        # If board was already awaiting_admin with a different group, log the update
+        # If board is already awaiting_admin for the SAME group, this is a
+        # duplicate event (e.g. member→administrator or permissions change).
+        # Silently ignore it so the user only gets one notification.
+        if (pending['status'] == 'awaiting_admin'
+                and pending.get('group_chat_id') == group_chat_id):
+            logger.info(
+                f"Ignoring duplicate my_chat_member event for board {pending['id']} "
+                f"in group {group_chat_id} ({old_status} -> {new_status})"
+            )
+            return
+
+        # If board was awaiting_admin with a DIFFERENT group, log the update
         if pending['status'] == 'awaiting_admin' and pending.get('group_chat_id') != group_chat_id:
             logger.info(
                 f"Updating stale group_chat_id for board {pending['id']}: "
@@ -933,7 +944,7 @@ async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Save/update group_chat_id and transition to 'awaiting_admin'
         database.set_board_awaiting_admin(pending['id'], group_chat_id)
 
-        # Send private message to the user
+        # Send private message to the user (only once per group)
         try:
             await context.bot.send_message(
                 chat_id=adder_user_id,
