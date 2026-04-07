@@ -801,13 +801,27 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     group_chat_id = board['group_chat_id']
+    logger.info(
+        f"ready_handler: user={user_id}, group_chat_id={group_chat_id}, "
+        f"bot.id={context.bot.id}"
+    )
 
     # Check if the bot is an admin in the group
     try:
         bot_member = await context.bot.get_chat_member(group_chat_id, context.bot.id)
-        is_admin = bot_member.status == 'administrator'
+        logger.info(
+            f"ready_handler: get_chat_member returned type={type(bot_member).__name__}, "
+            f"status='{bot_member.status}', "
+            f"can_pin_messages={getattr(bot_member, 'can_pin_messages', 'N/A')}, "
+            f"can_send_messages={getattr(bot_member, 'can_send_messages', 'N/A')}, "
+            f"full_object={bot_member.to_dict() if hasattr(bot_member, 'to_dict') else bot_member}"
+        )
+        is_admin = bot_member.status in ('administrator', 'creator')
     except Exception as e:
-        logger.warning(f"Could not check bot admin status in group {group_chat_id}: {e}")
+        logger.warning(
+            f"ready_handler: Could not check bot admin status in group {group_chat_id}: "
+            f"type={type(e).__name__}, error={e}"
+        )
         await update.message.reply_text(
             "❌ I couldn't check my status in the group. "
             "Please make sure I'm still a member of the group and try again by sending **Ready**.",
@@ -816,6 +830,10 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return GP_WAITING_FOR_GROUP
 
     if not is_admin:
+        logger.warning(
+            f"ready_handler: Bot is NOT admin in group {group_chat_id}. "
+            f"status='{bot_member.status}'"
+        )
         await update.message.reply_text(
             "⚠️ I'm not an admin in the group yet.\n\n"
             "Please make me an admin with permission to pin messages, "
