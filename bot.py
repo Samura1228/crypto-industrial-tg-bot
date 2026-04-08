@@ -52,8 +52,12 @@ GP_WAITING_FOR_GROUP = 31
 NEW_FLOW_USER_IDS = {6840070959}
 
 def is_new_flow_user(user_id: int) -> bool:
-    """Gate function: returns True if user should see the new asset selection flow."""
-    return user_id in NEW_FLOW_USER_IDS
+    """Gate function: returns True if user should see the new asset selection flow.
+    
+    NOTE: Gate removed — all users now see the new flow.
+    NEW_FLOW_USER_IDS is kept above for historical reference only.
+    """
+    return True
 
 # Common timezones map
 TIMEZONES = {
@@ -1202,6 +1206,73 @@ async def restore_group_price_boards(context: ContextTypes.DEFAULT_TYPE):
 async def update_price_cache_job(context: ContextTypes.DEFAULT_TYPE):
     """Background job to update price cache periodically."""
     price_service.update_cache()
+# ---------------------------------------------------------------------------
+# /notify_update — one-time admin command to notify all users about updates
+# ---------------------------------------------------------------------------
+
+ADMIN_USER_ID = 6840070959
+
+async def notify_update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only command to send an update notification to all users."""
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ This command is restricted to the bot admin.")
+        return
+
+    await update.message.reply_text("📤 Sending update notification to all users...")
+
+    all_user_ids = database.get_all_user_ids()
+    success_count = 0
+    fail_count = 0
+
+    for uid in all_user_ids:
+        try:
+            # Try to get the user's first name
+            try:
+                chat = await context.bot.get_chat(uid)
+                first_name = chat.first_name or "there"
+            except Exception:
+                first_name = "there"
+
+            message_text = (
+                f"🎉 *Hey {first_name}! We've got exciting news!*\n"
+                "\n"
+                "We've been working hard on some awesome updates for you. Here's what's new:\n"
+                "\n"
+                "✨ *1. Personalized Price Alerts*\n"
+                "You can now choose exactly which assets you want to track! No more getting prices you don't care about. "
+                "Use /settings to pick your favorites — Bitcoin, Ethereum, Gold, Oil, and more.\n"
+                "\n"
+                "🗑 *2. Easy Subscription Management*\n"
+                "Managing your subscriptions just got easier! Use /subscriptions to see all your daily alerts "
+                "and remove individual ones with a single tap — no need to delete everything at once.\n"
+                "\n"
+                "📌 *3. Group Price Board* _(NEW!)_\n"
+                "Want live prices in your Telegram group? Use /groupprice to set up a pinned price board "
+                "that updates automatically every hour! Perfect for crypto & trading groups.\n"
+                "\n"
+                "🔧 *4. Improved Reliability*\n"
+                "We've fixed several bugs and improved price accuracy for oil, metals, and currencies.\n"
+                "\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "\n"
+                "💡 *Quick start:* Send /start to set up your personalized alerts!\n"
+                "\n"
+                "Thank you for using our bot! 🙏"
+            )
+
+            await context.bot.send_message(chat_id=uid, text=message_text, parse_mode='Markdown')
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to send update notification to user {uid}: {e}")
+            fail_count += 1
+
+        await asyncio.sleep(0.1)
+
+    await update.message.reply_text(
+        f"✅ Notification sent to {success_count} users ({fail_count} failed)"
+    )
 
 # ---------------------------------------------------------------------------
 # Main — application setup
@@ -1293,6 +1364,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('subscriptions', subscriptions_command))
     application.add_handler(CallbackQueryHandler(remove_single_sub, pattern=r'^remove_sub:'))
     application.add_handler(CallbackQueryHandler(remove_all_subs, pattern=r'^remove_all$'))
+    application.add_handler(CommandHandler('notify_update', notify_update_command))
 
     # Standalone "Ready" handler — catches "ready" in private chat AFTER the
     # groupprice conversation has timed out (conversation handlers take priority

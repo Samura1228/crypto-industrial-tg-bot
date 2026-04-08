@@ -543,3 +543,18 @@ def get_awaiting_admin_board_for_user(user_id: int):
     finally:
         if conn:
             conn.close()
+def get_all_user_ids() -> list[int]:
+    """Return all unique user_ids from the subscriptions_v2 table."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT DISTINCT user_id FROM subscriptions_v2')
+        rows = cursor.fetchall()
+        return [row[0] for row in rows]
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching all user IDs: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
