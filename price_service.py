@@ -30,6 +30,7 @@ ASSET_REGISTRY = [
     {"key": "KAG",     "emoji": "⚪", "label": "Silver (KAG)",     "category": "Metals (1 oz)", "currency_symbol": "$"},
     {"key": "WTI",     "emoji": "🛢️", "label": "WTI Crude",        "category": "Oil (Barrel)", "currency_symbol": "$"},
     {"key": "BRENT",   "emoji": "🛢️", "label": "Brent Crude",      "category": "Oil (Barrel)", "currency_symbol": "$"},
+    {"key": "sp500",   "emoji": "📈", "label": "S&P 500",          "category": "Indices",      "currency_symbol": "$"},
     {"key": "USD_RUB", "emoji": "🇺🇸", "label": "USD/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
     {"key": "EUR_RUB", "emoji": "🇪🇺", "label": "EUR/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
 ]
@@ -42,6 +43,7 @@ CACHE_DURATION = 1800
 _cache = {
     "crypto": {},
     "oil": {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}},
+    "indices": {"sp500": {"price": None, "change": None}},
     "forex": {"USD": {"price": None, "change": None}, "EUR": {"price": None, "change": None}},
     "last_updated": 0
 }
@@ -144,6 +146,11 @@ def update_cache():
     if brent_data:
         _cache["oil"]["Brent"] = brent_data
 
+    # 5. Fetch S&P 500 (Yahoo Finance)
+    sp500_data = get_yfinance_data("^GSPC")
+    if sp500_data:
+        _cache["indices"]["sp500"] = sp500_data
+
     _cache["last_updated"] = time.time()
     logger.info("Price cache updated.")
 
@@ -151,6 +158,7 @@ def _get_asset_price_data(key):
     """Maps an asset key to its cached price data."""
     c = _cache["crypto"]
     o = _cache["oil"]
+    i = _cache["indices"]
     f = _cache["forex"]
     mapping = {
         "BTC": c.get("BTC"),
@@ -161,6 +169,7 @@ def _get_asset_price_data(key):
         "KAG": c.get("KAG"),
         "WTI": o.get("WTI"),
         "BRENT": o.get("Brent"),
+        "sp500": i.get("sp500"),
         "USD_RUB": f.get("USD"),
         "EUR_RUB": f.get("EUR"),
     }
