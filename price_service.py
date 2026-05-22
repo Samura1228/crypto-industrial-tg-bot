@@ -31,6 +31,7 @@ ASSET_REGISTRY = [
     {"key": "WTI",     "emoji": "🛢️", "label": "WTI Crude",        "category": "Oil (Barrel)", "currency_symbol": "$"},
     {"key": "BRENT",   "emoji": "🛢️", "label": "Brent Crude",      "category": "Oil (Barrel)", "currency_symbol": "$"},
     {"key": "sp500",   "emoji": "📈", "label": "S&P 500",          "category": "Indices",      "currency_symbol": "$"},
+    {"key": "nasdaq",  "emoji": "📊", "label": "NASDAQ",           "category": "Indices",      "currency_symbol": "$"},
     {"key": "USD_RUB", "emoji": "🇺🇸", "label": "USD/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
     {"key": "EUR_RUB", "emoji": "🇪🇺", "label": "EUR/RUB",         "category": "Currencies (RUB)", "currency_symbol": "₽"},
 ]
@@ -43,7 +44,7 @@ CACHE_DURATION = 1800
 _cache = {
     "crypto": {},
     "oil": {"WTI": {"price": None, "change": None}, "Brent": {"price": None, "change": None}},
-    "indices": {"sp500": {"price": None, "change": None}},
+    "indices": {"sp500": {"price": None, "change": None}, "nasdaq": {"price": None, "change": None}},
     "forex": {"USD": {"price": None, "change": None}, "EUR": {"price": None, "change": None}},
     "last_updated": 0
 }
@@ -151,6 +152,11 @@ def update_cache():
     if sp500_data:
         _cache["indices"]["sp500"] = sp500_data
 
+    # 6. Fetch NASDAQ Composite (Yahoo Finance)
+    nasdaq_data = get_yfinance_data("^IXIC")
+    if nasdaq_data:
+        _cache["indices"]["nasdaq"] = nasdaq_data
+
     _cache["last_updated"] = time.time()
     logger.info("Price cache updated.")
 
@@ -170,6 +176,7 @@ def _get_asset_price_data(key):
         "WTI": o.get("WTI"),
         "BRENT": o.get("Brent"),
         "sp500": i.get("sp500"),
+        "nasdaq": i.get("nasdaq"),
         "USD_RUB": f.get("USD"),
         "EUR_RUB": f.get("EUR"),
     }
