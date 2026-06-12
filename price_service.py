@@ -95,26 +95,104 @@ def update_cache():
     Fetches all data and updates the global cache.
     """
     logger.info("Updating price cache...")
-    
+
     # 1. Fetch Crypto + Metals (CryptoCompare)
-    fsyms = "BTC,ETH,TON,SOL,PAXG,KAG"
+    expected_symbols = ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG"]
+    fsyms = ",".join(expected_symbols)
     tsyms = "USD"
+
+    if not API_KEY:
+        logger.error(
+            "CRYPTOCOMPARE_API_KEY is missing from environment! "
+            "CryptoCompare may rate-limit or reject requests."
+        )
+
+    # Snapshot pre-fetch crypto cache so we can detect stale (un-refreshed) entries
+    crypto_before = {
+        sym: (_cache["crypto"].get(sym) or {}).get("price")
+        for sym in expected_symbols
+    }
+    refreshed_symbols: set = set()
+
     url = f"{BASE_URL}?fsyms={fsyms}&tsyms={tsyms}&api_key={API_KEY}"
-    
+    # Don't log full URL — it contains the API key. Log a redacted form.
+    logger.info(
+        f"CryptoCompare request: fsyms={fsyms} tsyms={tsyms} "
+        f"(api_key={'set' if API_KEY else 'MISSING'})"
+    )
+
     try:
-        response = requests.get(url)
-        data = response.json()
-        
-        if "RAW" in data:
-            for symbol in ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG"]:
-                try:
-                    price = data["RAW"][symbol]["USD"]["PRICE"]
-                    change = data["RAW"][symbol]["USD"]["CHANGE24HOUR"]
-                    _cache["crypto"][symbol] = {"price": price, "change": change}
-                except KeyError:
-                    pass
+        response = requests.get(url, timeout=15)
+        logger.info(f"CryptoCompare HTTP status: {response.status_code}")
+
+        if response.status_code != 200:
+            # Surface non-2xx responses — these silently failed before
+            logger.error(
+                f"CryptoCompare returned non-200 status {response.status_code}. "
+                f"Body (truncated): {response.text[:500]}"
+            )
+        else:
+            try:
+                data = response.json()
+            except ValueError as je:
+                logger.error(
+                    f"CryptoCompare returned non-JSON response: {je}. "
+                    f"Body (truncated): {response.text[:500]}"
+                )
+                data = {}
+
+            # CryptoCompare's standard error envelope:
+            # {"Response": "Error", "Message": "...", "Type": ...}
+            if isinstance(data, dict) and data.get("Response") == "Error":
+                logger.error(
+                    "CryptoCompare API returned an error envelope. "
+                    f"Type={data.get('Type')} Message={data.get('Message')!r}. "
+                    "Crypto prices will NOT be refreshed this cycle "
+                    "(stale values will persist)."
+                )
+            elif "RAW" not in data:
+                # Either rate-limited, throttled, or unexpected payload shape.
+                logger.error(
+                    "CryptoCompare response missing 'RAW' field — "
+                    "crypto prices will NOT be refreshed. "
+                    f"Response keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}. "
+                    f"Body (truncated): {str(data)[:500]}"
+                )
+            else:
+                for symbol in expected_symbols:
+                    try:
+                        price = data["RAW"][symbol]["USD"]["PRICE"]
+                        change = data["RAW"][symbol]["USD"]["CHANGE24HOUR"]
+                        _cache["crypto"][symbol] = {"price": price, "change": change}
+                        refreshed_symbols.add(symbol)
+                    except KeyError as ke:
+                        logger.warning(
+                            f"CryptoCompare RAW payload missing data for {symbol} "
+                            f"(KeyError: {ke}). Symbol will keep its previous cached value."
+                        )
+    except requests.exceptions.Timeout:
+        logger.error("CryptoCompare request timed out after 15s — crypto cache not refreshed.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"CryptoCompare network/request error: {e!r}")
     except Exception as e:
-        logger.error(f"Error fetching crypto data: {e}")
+        logger.exception(f"Unexpected error fetching crypto data: {e!r}")
+
+    # Stale-cache detection: report any expected symbol that wasn't refreshed this cycle.
+    stale_symbols = [s for s in expected_symbols if s not in refreshed_symbols]
+    if stale_symbols:
+        details = []
+        for sym in stale_symbols:
+            prev_price = crypto_before.get(sym)
+            details.append(f"{sym}={prev_price}")
+        logger.warning(
+            "STALE CRYPTO CACHE: the following symbols were NOT refreshed this cycle "
+            f"and will keep previous values: {', '.join(details)}. "
+            "Investigate CryptoCompare API health / rate limits / API key validity."
+        )
+    else:
+        logger.info(
+            f"Crypto cache successfully refreshed for all {len(refreshed_symbols)} symbols."
+        )
 
     # 2. Fetch Forex (FloatRates - Free, No Key)
     try:
