@@ -16,9 +16,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 AV_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
-BASE_URL = "https://min-api.cryptocompare.com/data/pricemultifull"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+# Mapping from internal symbol -> CoinGecko ID
+COINGECKO_ID_MAP = {
+    "BTC":  "bitcoin",
+    "ETH":  "ethereum",
+    "TON":  "the-open-network",
+    "SOL":  "solana",
+    "PAXG": "pax-gold",
+    "KAG":  "kinesis-silver",
+}
+# Reverse mapping CoinGecko ID -> internal symbol
+COINGECKO_ID_TO_SYMBOL = {v: k for k, v in COINGECKO_ID_MAP.items()}
 
 # Asset Registry — canonical list of all tracked assets
 ASSET_REGISTRY = [
@@ -96,15 +108,14 @@ def update_cache():
     """
     logger.info("Updating price cache...")
 
-    # 1. Fetch Crypto + Metals (CryptoCompare)
+    # 1. Fetch Crypto + Metals (CoinGecko)
     expected_symbols = ["BTC", "ETH", "TON", "SOL", "PAXG", "KAG"]
-    fsyms = ",".join(expected_symbols)
-    tsyms = "USD"
+    ids_param = ",".join(COINGECKO_ID_MAP[sym] for sym in expected_symbols)
 
-    if not API_KEY:
+    if not COINGECKO_API_KEY:
         logger.error(
-            "CRYPTOCOMPARE_API_KEY is missing from environment! "
-            "CryptoCompare may rate-limit or reject requests."
+            "COINGECKO_API_KEY is missing from environment! "
+            "CoinGecko may rate-limit or reject requests."
         )
 
     # Snapshot pre-fetch crypto cache so we can detect stale (un-refreshed) entries
@@ -114,21 +125,35 @@ def update_cache():
     }
     refreshed_symbols: set = set()
 
-    url = f"{BASE_URL}?fsyms={fsyms}&tsyms={tsyms}&api_key={API_KEY}"
-    # Don't log full URL — it contains the API key. Log a redacted form.
+    headers = {
+        "accept": "application/json",
+    }
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+
+    params = {
+        "ids": ids_param,
+        "vs_currencies": "usd",
+        "include_24hr_change": "true",
+    }
+
     logger.info(
-        f"CryptoCompare request: fsyms={fsyms} tsyms={tsyms} "
-        f"(api_key={'set' if API_KEY else 'MISSING'})"
+        f"CoinGecko request: ids={ids_param} vs_currencies=usd "
+        f"(api_key={'set' if COINGECKO_API_KEY else 'MISSING'})"
     )
 
     try:
-        response = requests.get(url, timeout=15)
-        logger.info(f"CryptoCompare HTTP status: {response.status_code}")
+        response = requests.get(COINGECKO_URL, headers=headers, params=params, timeout=15)
+        logger.info(f"CoinGecko HTTP status: {response.status_code}")
 
-        if response.status_code != 200:
-            # Surface non-2xx responses — these silently failed before
+        if response.status_code == 429:
             logger.error(
-                f"CryptoCompare returned non-200 status {response.status_code}. "
+                "CoinGecko rate limit (429) hit — crypto prices will NOT be refreshed this cycle. "
+                f"Body (truncated): {response.text[:500]}"
+            )
+        elif response.status_code != 200:
+            logger.error(
+                f"CoinGecko returned non-200 status {response.status_code}. "
                 f"Body (truncated): {response.text[:500]}"
             )
         else:
@@ -136,44 +161,43 @@ def update_cache():
                 data = response.json()
             except ValueError as je:
                 logger.error(
-                    f"CryptoCompare returned non-JSON response: {je}. "
+                    f"CoinGecko returned non-JSON response: {je}. "
                     f"Body (truncated): {response.text[:500]}"
                 )
                 data = {}
 
-            # CryptoCompare's standard error envelope:
-            # {"Response": "Error", "Message": "...", "Type": ...}
-            if isinstance(data, dict) and data.get("Response") == "Error":
+            if not isinstance(data, dict) or not data:
                 logger.error(
-                    "CryptoCompare API returned an error envelope. "
-                    f"Type={data.get('Type')} Message={data.get('Message')!r}. "
-                    "Crypto prices will NOT be refreshed this cycle "
-                    "(stale values will persist)."
-                )
-            elif "RAW" not in data:
-                # Either rate-limited, throttled, or unexpected payload shape.
-                logger.error(
-                    "CryptoCompare response missing 'RAW' field — "
+                    "CoinGecko response empty or unexpected shape — "
                     "crypto prices will NOT be refreshed. "
-                    f"Response keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}. "
                     f"Body (truncated): {str(data)[:500]}"
                 )
             else:
                 for symbol in expected_symbols:
-                    try:
-                        price = data["RAW"][symbol]["USD"]["PRICE"]
-                        change = data["RAW"][symbol]["USD"]["CHANGE24HOUR"]
-                        _cache["crypto"][symbol] = {"price": price, "change": change}
-                        refreshed_symbols.add(symbol)
-                    except KeyError as ke:
+                    cg_id = COINGECKO_ID_MAP[symbol]
+                    entry = data.get(cg_id)
+                    if not entry or "usd" not in entry:
                         logger.warning(
-                            f"CryptoCompare RAW payload missing data for {symbol} "
-                            f"(KeyError: {ke}). Symbol will keep its previous cached value."
+                            f"CoinGecko payload missing data for {symbol} (id={cg_id}). "
+                            "Symbol will keep its previous cached value."
+                        )
+                        continue
+                    try:
+                        price = float(entry["usd"])
+                        # 24h change as percentage; existing get_arrow() works off sign.
+                        change_pct = entry.get("usd_24h_change")
+                        change_val = float(change_pct) if change_pct is not None else 0.0
+                        _cache["crypto"][symbol] = {"price": price, "change": change_val}
+                        refreshed_symbols.add(symbol)
+                    except (TypeError, ValueError) as ve:
+                        logger.warning(
+                            f"CoinGecko payload had invalid numeric data for {symbol} "
+                            f"({ve!r}). Symbol will keep its previous cached value."
                         )
     except requests.exceptions.Timeout:
-        logger.error("CryptoCompare request timed out after 15s — crypto cache not refreshed.")
+        logger.error("CoinGecko request timed out after 15s — crypto cache not refreshed.")
     except requests.exceptions.RequestException as e:
-        logger.error(f"CryptoCompare network/request error: {e!r}")
+        logger.error(f"CoinGecko network/request error: {e!r}")
     except Exception as e:
         logger.exception(f"Unexpected error fetching crypto data: {e!r}")
 
@@ -187,11 +211,12 @@ def update_cache():
         logger.warning(
             "STALE CRYPTO CACHE: the following symbols were NOT refreshed this cycle "
             f"and will keep previous values: {', '.join(details)}. "
-            "Investigate CryptoCompare API health / rate limits / API key validity."
+            "Investigate CoinGecko API health / rate limits / API key validity."
         )
     else:
         logger.info(
-            f"Crypto cache successfully refreshed for all {len(refreshed_symbols)} symbols."
+            f"Crypto cache successfully refreshed for all {len(refreshed_symbols)} symbols: "
+            f"{sorted(refreshed_symbols)}"
         )
 
     # 2. Fetch Forex (FloatRates - Free, No Key)
