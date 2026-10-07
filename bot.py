@@ -1132,6 +1132,26 @@ async def remove_all_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("🗑️ All subscriptions removed.")
 
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /cancel outside a conversation — removes all daily subscriptions."""
+    user_id = update.effective_user.id
+
+    if not database.get_user_subscriptions(user_id):
+        await update.message.reply_text("ℹ️ You have no active daily subscriptions.")
+        return
+
+    database.remove_subscription(user_id)
+
+    # Remove scheduled daily jobs
+    current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
+    for job in current_jobs:
+        job.schedule_removal()
+
+    await update.message.reply_text(
+        "🔕 You have been unsubscribed from daily price updates.\n\n"
+        "Use /start to subscribe again."
+    )
+
 # ---------------------------------------------------------------------------
 # Daily notification job — now supports filtered prices
 # ---------------------------------------------------------------------------
@@ -1365,6 +1385,9 @@ if __name__ == '__main__':
     application.add_handler(CallbackQueryHandler(remove_single_sub, pattern=r'^remove_sub:'))
     application.add_handler(CallbackQueryHandler(remove_all_subs, pattern=r'^remove_all$'))
     application.add_handler(CommandHandler('notify_update', notify_update_command))
+    # Standalone /cancel — only fires when no conversation is active
+    # (inside a conversation, its /cancel fallback takes priority).
+    application.add_handler(CommandHandler('cancel', unsubscribe_command))
 
     # Standalone "Ready" handler — catches "ready" in private chat AFTER the
     # groupprice conversation has timed out (conversation handlers take priority
